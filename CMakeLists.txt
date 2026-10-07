@@ -9,6 +9,7 @@ add_executable(Chessie.elf
         src/boot.S
         src/kernel/main.c
         src/drivers/vga.c
+        src/include/string.h
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
