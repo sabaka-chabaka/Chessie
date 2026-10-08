@@ -13,6 +13,8 @@ add_executable(Chessie.elf
         src/lib/string.c
         src/include/kprintf.h
         src/kernel/kprintf.c
+        src/include/serial.h
+        src/drivers/serial.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
@@ -46,6 +48,6 @@ add_custom_target(iso ALL
 add_dependencies(iso Chessie.elf)
 
 add_custom_target(run
-        COMMAND qemu-system-i386 -cdrom ${ISO_FILE}
+        COMMAND qemu-system-i386 -cdrom ${ISO_FILE} -serial stdio
         DEPENDS iso
 )

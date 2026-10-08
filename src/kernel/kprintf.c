@@ -4,10 +4,13 @@
 #include <kprintf.h>
 #include <vga.h>
 
+#include "serial.h"
+
 static const char digits[] = "0123456789abcdef";
 
 static void kputc(char c) {
     vga_putc(c);
+    serial_putc(c);
 }
 
 static void kputs(const char *s) {
