@@ -11,6 +11,8 @@ add_executable(Chessie.elf
         src/drivers/vga.c
         src/include/string.h
         src/lib/string.c
+        src/include/kprintf.h
+        src/kernel/kprintf.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)

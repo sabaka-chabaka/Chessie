@@ -1,24 +1,15 @@
 #include <vga.h>
-#include <string.h>
+#include <kprintf.h>
 
 void kernel_main(void)
 {
     vga_init();
 
     vga_set_color(VGA_LIGHT_GREEN, VGA_BLACK);
-    vga_write("Hello from Chessie!\n");
+    kprintf("Hello from Chessie!\n");
 
-    vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
-    vga_write("VGA driver works.\n");
-
-    const char *s1 = "Hello World";
-    const char *s2 = "Hello";
-    int res = strcmp(s1, s2);
-
-    char resStr[16];
-    int_to_str(res, resStr);
-
-    vga_set_color(VGA_WHITE, VGA_BLACK);
-    vga_write(resStr);
-
+    kprintf("%d %u %x %s %c %%\n", -42, 42, 0xDEAD, "ok", 'A');
+    kprintf("%d %d\n", 0, -2147483647 - 1);
+    kprintf("%u %x\n", 4294967295u, 0xFFFFFFFFu);
+    kprintf("%s|%p\n", (char *)0, (void *)0x1000);
 }
