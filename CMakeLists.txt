@@ -18,6 +18,10 @@ add_executable(Chessie.elf
         src/drivers/serial.c
         src/include/gdt.h
         src/cpu/gdt.c
+        src/include/idt.h
+        src/cpu/isr.c
+        src/cpu/idt.c
+        src/cpu/idt.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
