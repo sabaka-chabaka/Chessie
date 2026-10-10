@@ -5,17 +5,8 @@
 #include <idt.h>
 #include <irq.h>
 #include <pic.h>
+#include <pit.h>
 
-static volatile unsigned ticks;
-
-static void timer_callback(registers_t *regs)
-{
-    (void)regs;
-    ticks++;
-    kprintf(".");
-}
-
-// ReSharper disable once CppUseInternalLinkage
 void kernel_main(void)
 {
     vga_init();
@@ -23,15 +14,15 @@ void kernel_main(void)
     gdt_init();
     idt_init();
     pic_init();
+    pit_init(TIMER_HZ);
 
     vga_set_color(VGA_LIGHT_GREEN, VGA_BLACK);
     kprintf("Hello from Chessie!\n");
 
-    irq_register_handler(IRQ_TIMER, timer_callback);
-    pic_clear_mask(IRQ_TIMER);
-
     __asm__ volatile ("sti");
 
-    for (;;)
-        __asm__ volatile ("hlt");
+    for (unsigned s = 1; ; s++) {
+        sleep_ms(1000);
+        kprintf("uptime: %u s\n", s);
+    }
 }

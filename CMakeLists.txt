@@ -28,6 +28,8 @@ add_executable(Chessie.elf
         src/include/irq.h
         src/cpu/pic.c
         src/cpu/irq.c
+        src/include/pit.h
+        src/drivers/pit.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
