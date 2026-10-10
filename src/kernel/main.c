@@ -15,6 +15,7 @@ static void timer_callback(registers_t *regs)
     kprintf(".");
 }
 
+// ReSharper disable once CppUseInternalLinkage
 void kernel_main(void)
 {
     vga_init();
