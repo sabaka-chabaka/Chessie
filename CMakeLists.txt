@@ -8,6 +8,7 @@ project(Chessie C ASM)
 add_executable(Chessie.elf
         src/boot.S
         src/cpu/gdt_flush.S
+        src/cpu/isr.s
         src/kernel/main.c
         src/drivers/vga.c
         src/include/string.h
