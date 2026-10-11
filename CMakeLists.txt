@@ -32,6 +32,8 @@ add_executable(Chessie.elf
         src/drivers/pit.c
         src/include/keyboard.h
         src/drivers/keyboard.c
+        src/include/shell.h
+        src/kernel/shell.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)

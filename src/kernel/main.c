@@ -7,6 +7,7 @@
 #include <pic.h>
 #include <pit.h>
 #include <keyboard.h>
+#include <shell.h>
 
 void kernel_main(void)
 {
@@ -23,6 +24,5 @@ void kernel_main(void)
 
     __asm__ volatile ("sti");
 
-    for (;;)
-        kprintf("%c", keyboard_getchar());
+    shell_run();
 }
