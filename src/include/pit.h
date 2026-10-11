@@ -14,3 +14,4 @@
 void pit_init(uint32_t hz);
 uint32_t timer_ticks(void);
 void sleep_ms(uint32_t ms);
+void pit_set_hook(void (*fn)(void));

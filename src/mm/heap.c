@@ -5,6 +5,7 @@
 #include <kprintf.h>
 #include <pmm.h>
 #include <string.h>
+#include <sync.h>
 #include <vmm.h>
 
 #define MAGIC_USED 0xA110C8EDu
@@ -98,7 +99,7 @@ static struct block *find_fit(uint32_t size)
     return 0;
 }
 
-void *kmalloc(size_t size)
+static void *kmalloc_nolock(size_t size)
 {
     if (size == 0 || size > KHEAP_MAX - KHEAP_START)
         return 0;
@@ -133,19 +134,7 @@ void *kmalloc(size_t size)
     return (uint8_t *)b + HDR;
 }
 
-void *kcalloc(size_t n, size_t size)
-{
-    if (n && size > 0xFFFFFFFFu / n)
-        return 0;
-
-    void *p = kmalloc(n * size);
-
-    if (p)
-        memset(p, 0, n * size);
-    return p;
-}
-
-void kfree(void *ptr)
+static void kfree_nolock(void *ptr)
 {
     if (!ptr)
         return;
@@ -195,7 +184,7 @@ void kfree(void *ptr)
     }
 }
 
-void heap_stats(heap_stats_t *s)
+static void stats_nolock(heap_stats_t *s)
 {
     memset(s, 0, sizeof(*s));
     s->mapped = heap_end - KHEAP_START;
@@ -219,4 +208,41 @@ void heap_stats(heap_stats_t *s)
                 s->errors++;
         }
     }
+}
+
+void *kmalloc(size_t size)
+{
+    uint32_t f = irq_save();
+    void *p = kmalloc_nolock(size);
+
+    irq_restore(f);
+    return p;
+}
+
+void *kcalloc(size_t n, size_t size)
+{
+    if (n && size > 0xFFFFFFFFu / n)
+        return 0;
+
+    void *p = kmalloc(n * size);
+
+    if (p)
+        memset(p, 0, n * size);
+    return p;
+}
+
+void kfree(void *ptr)
+{
+    uint32_t f = irq_save();
+
+    kfree_nolock(ptr);
+    irq_restore(f);
+}
+
+void heap_stats(heap_stats_t *s)
+{
+    uint32_t f = irq_save();
+
+    stats_nolock(s);
+    irq_restore(f);
 }

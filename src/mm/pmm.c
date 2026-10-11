@@ -4,6 +4,7 @@
 #include <multiboot.h>
 #include <pmm.h>
 #include <string.h>
+#include <sync.h>
 
 #define MAX_PAGES    (1u << 20)
 #define BITMAP_WORDS (MAX_PAGES / 32)
@@ -95,7 +96,7 @@ void pmm_init(const multiboot_info_t *mbi)
     reserve_range(mbi->mmap_addr, mbi->mmap_addr + mbi->mmap_length);
 }
 
-uint32_t pmm_alloc_page(void)
+static uint32_t alloc_nolock(void)
 {
     uint32_t words = (end_page + 31) / 32;
 
@@ -119,7 +120,7 @@ uint32_t pmm_alloc_page(void)
     return 0;
 }
 
-void pmm_free_page(uint32_t addr)
+static void free_nolock(uint32_t addr)
 {
     if (addr & (PAGE_SIZE - 1)) {
         kprintf("pmm: free of unaligned address %p\n", (void *)addr);
@@ -142,6 +143,23 @@ void pmm_free_page(uint32_t addr)
 
     if (p / 32 < hint)
         hint = p / 32;
+}
+
+uint32_t pmm_alloc_page(void)
+{
+    uint32_t f = irq_save();
+    uint32_t p = alloc_nolock();
+
+    irq_restore(f);
+    return p;
+}
+
+void pmm_free_page(uint32_t addr)
+{
+    uint32_t f = irq_save();
+
+    free_nolock(addr);
+    irq_restore(f);
 }
 
 uint32_t pmm_total_pages(void) { return total_pages; }

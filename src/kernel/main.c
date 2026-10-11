@@ -12,6 +12,7 @@
 #include <pmm.h>
 #include <vmm.h>
 #include <heap.h>
+#include <sched.h>
 #include <shell.h>
 
 void kernel_main(uint32_t magic, multiboot_info_t *mbi)
@@ -36,13 +37,12 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi)
     memmap_print(mbi);
 
     pmm_init(mbi);
-    kprintf("pmm: %u of %u pages free\n", pmm_free_pages(), pmm_total_pages());
-
     vmm_init();
-    kprintf("vmm: paging enabled, %u pages free\n", pmm_free_pages());
-
     heap_init();
-    kprintf("heap: ready at %p\n", (void *)KHEAP_START);
+    kprintf("mem: %u pages free, heap at %p\n", pmm_free_pages(), (void *)KHEAP_START);
+
+    sched_init();
+    kprintf("sched: ready\n");
 
     __asm__ volatile ("sti");
 

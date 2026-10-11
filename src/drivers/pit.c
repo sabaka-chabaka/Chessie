@@ -7,11 +7,20 @@
 
 static volatile uint32_t ticks;
 static uint32_t freq_hz = TIMER_HZ;
+static void (*tick_hook)(void);
 
 static void pit_callback(registers_t *regs)
 {
     (void)regs;
     ticks++;
+
+    if (tick_hook)
+        tick_hook();
+}
+
+void pit_set_hook(void (*fn)(void))
+{
+    tick_hook = fn;
 }
 
 void pit_init(uint32_t hz)

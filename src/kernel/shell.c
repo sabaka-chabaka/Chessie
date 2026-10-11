@@ -11,6 +11,9 @@
 #include <pmm.h>
 #include <heap.h>
 #include <vmm.h>
+#include <sched.h>
+#include <sync.h>
+#include <thread.h>
 
 extern char kernel_start[];
 extern char kernel_end[];
@@ -37,6 +40,10 @@ static int cmd_vmtest(int argc, char **argv);
 static int cmd_nullptr(int argc, char **argv);
 static int cmd_heapinfo(int argc, char **argv);
 static int cmd_heaptest(int argc, char **argv);
+static int cmd_ps(int argc, char **argv);
+static int cmd_threads(int argc, char **argv);
+static int cmd_sleeptest(int argc, char **argv);
+static int cmd_racetest(int argc, char **argv);
 
 static const struct command commands[] = {
     { "help",   "list commands",        cmd_help   },
@@ -50,6 +57,10 @@ static const struct command commands[] = {
     { "nullptr",  "read address 0 (page fault)", cmd_nullptr  },
     { "heapinfo", "kernel heap statistics",      cmd_heapinfo },
     { "heaptest", "stress the kernel heap",      cmd_heaptest },
+    { "ps",        "list threads",                         cmd_ps        },
+    { "threads",   "3 threads, preemption demo",           cmd_threads   },
+    { "sleeptest", "3 threads with different sleeps",      cmd_sleeptest },
+    { "racetest",  "racetest [irq|mutex]: data race demo", cmd_racetest  },
 };
 
 #define NCMDS (sizeof(commands) / sizeof(commands[0]))
@@ -222,6 +233,134 @@ static int cmd_heapinfo(int argc, char **argv)
     kprintf("mapped: %u KiB, used: %u B, free: %u B\n", s.mapped >> 10, s.used, s.free);
     kprintf("blocks: %u, headers: %u B, errors: %u\n",
             s.blocks, s.mapped - s.used - s.free, s.errors);
+    return 0;
+}
+
+static int cmd_ps(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    sched_list();
+    return 0;
+}
+
+static void spinner(void *arg)
+{
+    char c = (char)(uintptr_t)arg;
+
+    for (int i = 0; i < 60; i++) {
+        kprintf("%c", c);
+
+        uint32_t t0 = timer_ticks();
+        while (timer_ticks() - t0 < 2)
+            ;
+    }
+}
+
+static int cmd_threads(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    for (char c = 'A'; c <= 'C'; c++)
+        thread_create("spinner", spinner, (void *)(uintptr_t)c);
+    return 0;
+}
+
+struct sleeper {
+    const char *name;
+    uint32_t    period;
+};
+
+static const struct sleeper sleepers[] = {
+    { "fast", 300 }, { "mid", 500 }, { "slow", 700 },
+};
+
+static void sleeper_main(void *arg)
+{
+    const struct sleeper *s = arg;
+
+    for (int i = 1; i <= 5; i++) {
+        thread_sleep_ms(s->period);
+        kprintf("[%s] wake %d at tick %u\n", s->name, i, timer_ticks());
+    }
+}
+
+static int cmd_sleeptest(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    for (size_t i = 0; i < sizeof(sleepers) / sizeof(sleepers[0]); i++)
+        thread_create(sleepers[i].name, sleeper_main, (void *)&sleepers[i]);
+    return 0;
+}
+
+#define RACE_ITER 5000000u
+
+static volatile uint32_t shared;
+static volatile uint32_t finished;
+static int race_mode;
+static mutex_t race_lock;
+
+static void race_worker(void *arg)
+{
+    (void)arg;
+
+    for (uint32_t i = 0; i < RACE_ITER; i++) {
+        uint32_t f = 0;
+
+        if (race_mode == 1)
+            f = irq_save();
+        else if (race_mode == 2)
+            mutex_lock(&race_lock);
+
+        uint32_t tmp = shared;
+        tmp++;
+        shared = tmp;
+
+        if (race_mode == 1)
+            irq_restore(f);
+        else if (race_mode == 2)
+            mutex_unlock(&race_lock);
+    }
+
+    uint32_t f = irq_save();
+
+    finished++;
+    irq_restore(f);
+}
+
+static int cmd_racetest(int argc, char **argv)
+{
+    static const char *const mode_names[] = { "no protection", "irq_save", "mutex" };
+
+    race_mode = 0;
+    if (argc > 1) {
+        if (strcmp(argv[1], "irq") == 0)
+            race_mode = 1;
+        else if (strcmp(argv[1], "mutex") == 0)
+            race_mode = 2;
+    }
+
+    shared = 0;
+    finished = 0;
+    mutex_init(&race_lock);
+
+    uint32_t t0 = timer_ticks();
+
+    thread_create("race1", race_worker, NULL);
+    thread_create("race2", race_worker, NULL);
+
+    while (finished < 2)
+        thread_sleep_ms(10);
+
+    uint32_t expected = 2 * RACE_ITER;
+
+    kprintf("%s: counter %u, expected %u, lost %u, %u ms\n",
+            mode_names[race_mode], shared, expected, expected - shared,
+            (timer_ticks() - t0) * 1000 / TIMER_HZ);
     return 0;
 }
 

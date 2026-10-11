@@ -32,8 +32,8 @@ void irq_handler(registers_t *regs)
         return;
     }
 
+    pic_send_eoi(irq);
+
     if (handlers[irq])
         handlers[irq](regs);
-
-    pic_send_eoi(irq);
 }

@@ -5,12 +5,15 @@
 #include <vga.h>
 
 #include "serial.h"
+#include "sync.h"
 
 static const char digits[] = "0123456789abcdef";
 
 static void kputc(char c) {
+    uint32_t f = irq_save();
     vga_putc(c);
     serial_putc(c);
+    irq_restore(f);
 }
 
 static void kputs(const char *s) {

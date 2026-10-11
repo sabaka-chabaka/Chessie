@@ -10,6 +10,7 @@ add_executable(Chessie.elf
         src/cpu/gdt_flush.S
         src/cpu/isr.s
         src/cpu/irq.S
+        src/cpu/switch.S
         src/kernel/main.c
         src/drivers/vga.c
         src/include/string.h
@@ -44,6 +45,12 @@ add_executable(Chessie.elf
         src/mm/vmm.c
         src/include/heap.h
         src/mm/heap.c
+        src/include/thread.h
+        src/include/sched.h
+        src/include/sync.h
+        src/kernel/thread.c
+        src/kernel/sched.c
+        src/kernel/sync.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
