@@ -1,6 +1,7 @@
-#include <../include/idt.h>
+#include <stdint.h>
 
-#include "../include/kprintf.h"
+#include <idt.h>
+#include <kprintf.h>
 
 static const char *names[32] = {
     "Divide by zero", "Debug", "NMI", "Breakpoint", "Overflow",
@@ -13,9 +14,26 @@ static const char *names[32] = {
     "Hypervisor injection", "VMM communication", "Security", "Reserved"
 };
 
+static void page_fault_info(const registers_t *regs)
+{
+    uint32_t cr2;
+
+    __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));   /* адрес, на котором упали */
+
+    kprintf("page fault at %p: %s, %s, %s mode\n",
+            (void *)cr2,
+            (regs->err_code & 1) ? "protection violation" : "page not present",
+            (regs->err_code & 2) ? "write" : "read",
+            (regs->err_code & 4) ? "user" : "kernel");
+}
+
 void isr_handler(registers_t *regs)
 {
     kprintf("\nEXCEPTION %u: %s\n", regs->int_no, names[regs->int_no]);
+
+    if (regs->int_no == 14)
+        page_fault_info(regs);
+
     kprintf("err=%x eip=%x cs=%x eflags=%x\n",
             regs->err_code, regs->eip, regs->cs, regs->eflags);
     kprintf("eax=%x ebx=%x ecx=%x edx=%x\n",

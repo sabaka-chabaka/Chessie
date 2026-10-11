@@ -146,3 +146,10 @@ void pmm_free_page(uint32_t addr)
 
 uint32_t pmm_total_pages(void) { return total_pages; }
 uint32_t pmm_free_pages(void)  { return free_pages; }
+
+uint32_t pmm_max_addr(void)
+{
+    if (end_page >= (1u << 20))
+        return 0xFFFFF000u;
+    return end_page << PAGE_SHIFT;
+}

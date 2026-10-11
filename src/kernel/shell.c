@@ -9,6 +9,8 @@
 #include <string.h>
 #include <vga.h>
 #include <pmm.h>
+#include <heap.h>
+#include <vmm.h>
 
 extern char kernel_start[];
 extern char kernel_end[];
@@ -31,6 +33,10 @@ static int cmd_echo(int argc, char **argv);
 static int cmd_reboot(int argc, char **argv);
 static int cmd_mem(int argc, char **argv);
 static int cmd_memtest(int argc, char **argv);
+static int cmd_vmtest(int argc, char **argv);
+static int cmd_nullptr(int argc, char **argv);
+static int cmd_heapinfo(int argc, char **argv);
+static int cmd_heaptest(int argc, char **argv);
 
 static const struct command commands[] = {
     { "help",   "list commands",        cmd_help   },
@@ -40,6 +46,10 @@ static const struct command commands[] = {
     { "reboot", "restart the machine",  cmd_reboot },
     { "mem",     "physical memory usage",     cmd_mem     },
     { "memtest", "stress the page allocator", cmd_memtest },
+    { "vmtest",   "test page mapping",           cmd_vmtest   },
+    { "nullptr",  "read address 0 (page fault)", cmd_nullptr  },
+    { "heapinfo", "kernel heap statistics",      cmd_heapinfo },
+    { "heaptest", "stress the kernel heap",      cmd_heaptest },
 };
 
 #define NCMDS (sizeof(commands) / sizeof(commands[0]))
@@ -149,6 +159,156 @@ static int cmd_memtest(int argc, char **argv)
 
     kprintf("free before %u, after %u: %s\n", before, pmm_free_pages(),
             before == pmm_free_pages() ? "ok" : "LEAK");
+    return 0;
+}
+
+static int cmd_vmtest(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    uint32_t virt = 0xE0000000u;
+    uint32_t phys = pmm_alloc_page();
+
+    if (!phys) {
+        kprintf("out of memory\n");
+        return 1;
+    }
+    if (vmm_map_page(virt, phys, VMM_WRITE) != 0) {
+        kprintf("map failed\n");
+        pmm_free_page(phys);
+        return 1;
+    }
+
+    volatile uint32_t *v = (volatile uint32_t *)virt;
+    volatile uint32_t *p = (volatile uint32_t *)phys;   /* та же страница через identity */
+
+    kprintf("virt %p -> phys %p (lookup %p)\n",
+            (void *)virt, (void *)phys, (void *)vmm_get_phys(virt));
+
+    *v = 0xDEADBEEF;
+    kprintf("write via virt, read via phys: %x %s\n", *p, *p == 0xDEADBEEF ? "ok" : "FAIL");
+
+    *p = 0xCAFEBABE;
+    kprintf("write via phys, read via virt: %x %s\n", *v, *v == 0xCAFEBABE ? "ok" : "FAIL");
+
+    vmm_unmap_page(virt);
+    kprintf("after unmap, lookup: %p %s\n",
+            (void *)vmm_get_phys(virt), vmm_get_phys(virt) == 0 ? "ok" : "FAIL");
+
+    pmm_free_page(phys);
+    return 0;
+}
+
+static int cmd_nullptr(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    volatile uint32_t *p = (volatile uint32_t *)0;
+
+    kprintf("%x\n", *p);
+    return 0;
+}
+
+static int cmd_heapinfo(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    heap_stats_t s;
+
+    heap_stats(&s);
+    kprintf("mapped: %u KiB, used: %u B, free: %u B\n", s.mapped >> 10, s.used, s.free);
+    kprintf("blocks: %u, headers: %u B, errors: %u\n",
+            s.blocks, s.mapped - s.used - s.free, s.errors);
+    return 0;
+}
+
+static uint32_t seed = 12345;
+
+static uint32_t rnd(uint32_t n)
+{
+    seed = seed * 1103515245u + 12345u;
+    return (seed >> 16) % n;
+}
+
+static int free_checked(void *p, uint32_t len, uint8_t pat)
+{
+    uint8_t *b = p;
+    int bad = 0;
+
+    for (uint32_t k = 0; k < len; k++) {
+        if (b[k] != pat) {
+            bad = 1;
+            break;
+        }
+    }
+    kfree(p);
+    return bad;
+}
+
+static int cmd_heaptest(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    enum { N = 2000 };
+    static void    *ptr[N];
+    static uint32_t len[N];
+    static uint8_t  pat[N];
+    static int      order[N];
+    int bad = 0;
+
+    for (int i = 0; i < N; i++) {
+        len[i] = 1 + rnd(1000);
+        pat[i] = (uint8_t)(i * 7 + 1);
+        ptr[i] = kmalloc(len[i]);
+        if (!ptr[i] || ((uint32_t)ptr[i] & 15)) {
+            bad++;
+            ptr[i] = 0;
+            continue;
+        }
+        memset(ptr[i], pat[i], len[i]);
+    }
+
+    for (int i = 0; i < N; i += 2) {
+        if (ptr[i])
+            bad += free_checked(ptr[i], len[i], pat[i]);
+
+        len[i] = 1 + rnd(1000);
+        pat[i] = (uint8_t)(i * 13 + 5);
+        ptr[i] = kmalloc(len[i]);
+        if (!ptr[i]) {
+            bad++;
+            continue;
+        }
+        memset(ptr[i], pat[i], len[i]);
+    }
+
+    for (int i = 0; i < N; i++)
+        order[i] = i;
+    for (int i = N - 1; i > 0; i--) {
+        int j = (int)rnd((uint32_t)i + 1);
+        int t = order[i];
+
+        order[i] = order[j];
+        order[j] = t;
+    }
+    for (int k = 0; k < N; k++) {
+        int i = order[k];
+
+        if (ptr[i])
+            bad += free_checked(ptr[i], len[i], pat[i]);
+    }
+
+    heap_stats_t s;
+
+    heap_stats(&s);
+    kprintf("heap grew to %u KiB, corrupted blocks: %d\n", s.mapped >> 10, bad);
+    kprintf("after free: used %u, blocks %u, errors %u -> %s\n",
+            s.used, s.blocks, s.errors,
+            (!bad && s.used == 0 && s.blocks == 1 && !s.errors) ? "ok" : "FAIL");
     return 0;
 }
 

@@ -15,3 +15,4 @@ void pmm_free_page(uint32_t addr);
 
 uint32_t pmm_total_pages(void);
 uint32_t pmm_free_pages(void);
+uint32_t pmm_max_addr(void);
