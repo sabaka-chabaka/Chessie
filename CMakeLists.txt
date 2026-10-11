@@ -34,6 +34,9 @@ add_executable(Chessie.elf
         src/drivers/keyboard.c
         src/include/shell.h
         src/kernel/shell.c
+        src/include/multiboot.h
+        src/include/memmap.h
+        src/kernel/memmap.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
@@ -67,6 +70,6 @@ add_custom_target(iso ALL
 add_dependencies(iso Chessie.elf)
 
 add_custom_target(run
-        COMMAND qemu-system-i386 -cdrom ${ISO_FILE} -serial stdio
+        COMMAND qemu-system-i386 -cdrom ${ISO_FILE} -serial stdio -m 128M
         DEPENDS iso
 )

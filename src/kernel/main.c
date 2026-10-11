@@ -7,9 +7,11 @@
 #include <pic.h>
 #include <pit.h>
 #include <keyboard.h>
+#include <multiboot.h>
+#include <memmap.h>
 #include <shell.h>
 
-void kernel_main(void)
+void kernel_main(uint32_t magic, multiboot_info_t *mbi)
 {
     vga_init();
     serial_init();
@@ -21,6 +23,14 @@ void kernel_main(void)
 
     vga_set_color(VGA_LIGHT_GREEN, VGA_BLACK);
     kprintf("Hello from Chessie!\n");
+
+    if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
+        kprintf("bad multiboot magic: %x\n", magic);
+        for (;;)
+            __asm__ volatile ("cli; hlt");
+    }
+
+    memmap_print(mbi);
 
     __asm__ volatile ("sti");
 

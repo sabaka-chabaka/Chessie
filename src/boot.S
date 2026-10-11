@@ -1,5 +1,5 @@
 .set MAGIC,    0x1BADB002
-.set FLAGS,    0
+.set FLAGS,    0x2
 .set CHECKSUM, -(MAGIC + FLAGS)
 
 .section .multiboot, "a"
@@ -19,6 +19,8 @@ stack_top:
 .type _start, @function
 _start:
     mov $stack_top, %esp
+    push %ebx
+    push %eax
     call kernel_main
     cli
 1:  hlt
