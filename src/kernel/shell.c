@@ -8,6 +8,10 @@
 #include <shell.h>
 #include <string.h>
 #include <vga.h>
+#include <pmm.h>
+
+extern char kernel_start[];
+extern char kernel_end[];
 
 #define LINE_MAX 128
 #define ARGV_MAX 16
@@ -25,6 +29,8 @@ static int cmd_clear(int argc, char **argv);
 static int cmd_uptime(int argc, char **argv);
 static int cmd_echo(int argc, char **argv);
 static int cmd_reboot(int argc, char **argv);
+static int cmd_mem(int argc, char **argv);
+static int cmd_memtest(int argc, char **argv);
 
 static const struct command commands[] = {
     { "help",   "list commands",        cmd_help   },
@@ -32,6 +38,8 @@ static const struct command commands[] = {
     { "uptime", "time since boot",      cmd_uptime },
     { "echo",   "print arguments",      cmd_echo   },
     { "reboot", "restart the machine",  cmd_reboot },
+    { "mem",     "physical memory usage",     cmd_mem     },
+    { "memtest", "stress the page allocator", cmd_memtest },
 };
 
 #define NCMDS (sizeof(commands) / sizeof(commands[0]))
@@ -88,6 +96,60 @@ static int cmd_reboot(int argc, char **argv)
 
     for (;;)
         __asm__ volatile ("hlt");
+}
+
+static int cmd_mem(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    uint32_t total = pmm_total_pages();
+    uint32_t free  = pmm_free_pages();
+
+    kprintf("total: %u pages (%u KiB)\n", total, total * 4);
+    kprintf("free:  %u pages (%u KiB)\n", free,  free * 4);
+    kprintf("used:  %u pages (%u KiB)\n", total - free, (total - free) * 4);
+    return 0;
+}
+
+static int cmd_memtest(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    enum { N = 1000 };
+    static uint32_t pages[N];
+    uint32_t before = pmm_free_pages();
+    int got = 0;
+    int bad = 0;
+
+    for (; got < N; got++) {
+        pages[got] = pmm_alloc_page();
+        if (!pages[got])
+            break;
+    }
+
+    for (int i = 0; i < got; i++) {
+        if (pages[i] & (PAGE_SIZE - 1))
+            bad++;
+        if (pages[i] < 0x100000)
+            bad++;
+        if (pages[i] >= (uint32_t)kernel_start && pages[i] < (uint32_t)kernel_end)
+            bad++;
+        for (int j = 0; j < i; j++)
+            if (pages[i] == pages[j])
+                bad++;
+    }
+
+    kprintf("allocated %d, first %p, last %p, errors %d\n",
+            got, (void *)pages[0], (void *)pages[got - 1], bad);
+
+    for (int i = 0; i < got; i++)
+        pmm_free_page(pages[i]);
+
+    kprintf("free before %u, after %u: %s\n", before, pmm_free_pages(),
+            before == pmm_free_pages() ? "ok" : "LEAK");
+    return 0;
 }
 
 static void readline(char *buf, size_t max)

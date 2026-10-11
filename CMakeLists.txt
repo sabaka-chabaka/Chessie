@@ -37,6 +37,8 @@ add_executable(Chessie.elf
         src/include/multiboot.h
         src/include/memmap.h
         src/kernel/memmap.c
+        src/include/pmm.h
+        src/mm/pmm.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)

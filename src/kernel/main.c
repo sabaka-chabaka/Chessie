@@ -9,6 +9,7 @@
 #include <keyboard.h>
 #include <multiboot.h>
 #include <memmap.h>
+#include <pmm.h>
 #include <shell.h>
 
 void kernel_main(uint32_t magic, multiboot_info_t *mbi)
@@ -31,6 +32,10 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi)
     }
 
     memmap_print(mbi);
+
+    pmm_init(mbi);
+    kprintf("pmm: %u of %u pages free (%u MiB)\n",
+            pmm_free_pages(), pmm_total_pages(), pmm_free_pages() >> 8);
 
     __asm__ volatile ("sti");
 
