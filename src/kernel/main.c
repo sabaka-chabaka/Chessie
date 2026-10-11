@@ -6,6 +6,7 @@
 #include <irq.h>
 #include <pic.h>
 #include <pit.h>
+#include <keyboard.h>
 
 void kernel_main(void)
 {
@@ -15,14 +16,13 @@ void kernel_main(void)
     idt_init();
     pic_init();
     pit_init(TIMER_HZ);
+    keyboard_init();
 
     vga_set_color(VGA_LIGHT_GREEN, VGA_BLACK);
     kprintf("Hello from Chessie!\n");
 
     __asm__ volatile ("sti");
 
-    for (unsigned s = 1; ; s++) {
-        sleep_ms(1000);
-        kprintf("uptime: %u s\n", s);
-    }
+    for (;;)
+        kprintf("%c", keyboard_getchar());
 }
