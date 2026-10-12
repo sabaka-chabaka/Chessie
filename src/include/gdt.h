@@ -10,6 +10,11 @@
 #define GDT_USER_DATA   0x20
 #define GDT_TSS         0x28
 
+#define GDT_USER_CODE_SEL (GDT_USER_CODE | 3)
+#define GDT_USER_DATA_SEL (GDT_USER_DATA | 3)
+
+#define GDT_TSS_INDEX 5
+
 #define GDT_ACCESS_KERNEL_CODE 0x9A
 #define GDT_ACCESS_KERNEL_DATA 0x92
 #define GDT_ACCESS_USER_CODE   0xFA
@@ -33,5 +38,6 @@ struct gdt_ptr {
 } __attribute__((packed));
 
 void gdt_init(void);
+void gdt_set_entry(int idx, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags);
 
 extern void gdt_flush(uint32_t gdt_ptr_addr);

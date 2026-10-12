@@ -4,6 +4,7 @@
 #include <idt.h>
 #include <irq.h>
 #include <pic.h>
+#include <syscall.h>
 
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr   idtp;
@@ -27,6 +28,8 @@ void idt_init(void)
 
     for (int i = 0; i < 16; i++)
         idt_set_gate(IRQ_BASE + i, irq_stub_table[i], GDT_KERNEL_CODE, IDT_GATE_KERNEL);
+
+    idt_set_gate(0x80, (uint32_t)syscall_entry, GDT_KERNEL_CODE, IDT_GATE_USER);
 
     __asm__ volatile ("lidt %0" : : "m"(idtp));
 }

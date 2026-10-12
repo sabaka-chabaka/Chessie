@@ -2,6 +2,7 @@
 #include <kprintf.h>
 #include <serial.h>
 #include <gdt.h>
+#include <tss.h>
 #include <idt.h>
 #include <irq.h>
 #include <pic.h>
@@ -20,6 +21,7 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi)
     vga_init();
     serial_init();
     gdt_init();
+    tss_init();
     idt_init();
     pic_init();
     pit_init(TIMER_HZ);

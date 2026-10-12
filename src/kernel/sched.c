@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sync.h>
 #include <thread.h>
+#include <tss.h>
 
 extern void switch_context(uint32_t *old_esp, uint32_t new_esp);
 
@@ -115,6 +116,9 @@ void schedule(void)
         next->state = THREAD_RUNNING;
         current = next;
         slice_left = SCHED_QUANTUM_TICKS;
+
+        if (next->kstack)
+            tss_set_kernel_stack((uint32_t)next->kstack + THREAD_STACK_SIZE);
 
         switch_context(&prev->esp, next->esp);
     }

@@ -5,6 +5,7 @@
 #define IDT_ENTRIES 256
 
 #define IDT_GATE_KERNEL 0x8E
+#define IDT_GATE_USER   0xEE
 
 struct idt_entry {
     uint16_t base_low;

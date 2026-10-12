@@ -5,8 +5,7 @@
 static struct gdt_entry gdt[GDT_ENTRIES];
 static struct gdt_ptr   gp;
 
-static void gdt_set_entry(int idx, uint32_t base, uint32_t limit,
-                          uint8_t access, uint8_t flags)
+void gdt_set_entry(int idx, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags)
 {
     gdt[idx].base_low  = base & 0xFFFF;
     gdt[idx].base_mid  = (base >> 16) & 0xFF;
@@ -26,6 +25,8 @@ void gdt_init(void)
     gdt_set_entry(0, 0, 0,       0,                      0);
     gdt_set_entry(1, 0, 0xFFFFF, GDT_ACCESS_KERNEL_CODE, GDT_FLAGS_32BIT_PAGE);
     gdt_set_entry(2, 0, 0xFFFFF, GDT_ACCESS_KERNEL_DATA, GDT_FLAGS_32BIT_PAGE);
+    gdt_set_entry(3, 0, 0xFFFFF, GDT_ACCESS_USER_CODE,   GDT_FLAGS_32BIT_PAGE);
+    gdt_set_entry(4, 0, 0xFFFFF, GDT_ACCESS_USER_DATA,   GDT_FLAGS_32BIT_PAGE);
 
     gdt_flush((uint32_t)&gp);
 }

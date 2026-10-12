@@ -14,6 +14,9 @@
 #include <sched.h>
 #include <sync.h>
 #include <thread.h>
+#include <gdt.h>
+#include <syscall.h>
+#include <tss.h>
 
 extern char kernel_start[];
 extern char kernel_end[];
@@ -44,6 +47,8 @@ static int cmd_ps(int argc, char **argv);
 static int cmd_threads(int argc, char **argv);
 static int cmd_sleeptest(int argc, char **argv);
 static int cmd_racetest(int argc, char **argv);
+static int cmd_tss(int argc, char **argv);
+static int cmd_syscall(int argc, char **argv);
 
 static const struct command commands[] = {
     { "help",   "list commands",        cmd_help   },
@@ -61,6 +66,8 @@ static const struct command commands[] = {
     { "threads",   "3 threads, preemption demo",           cmd_threads   },
     { "sleeptest", "3 threads with different sleeps",      cmd_sleeptest },
     { "racetest",  "racetest [irq|mutex]: data race demo", cmd_racetest  },
+    { "tss",     "check TR, GDT and tss.esp0 per thread", cmd_tss     },
+    { "syscall", "test int 0x80 from kernel mode",        cmd_syscall },
 };
 
 #define NCMDS (sizeof(commands) / sizeof(commands[0]))
@@ -294,6 +301,117 @@ static int cmd_sleeptest(int argc, char **argv)
 
     for (size_t i = 0; i < sizeof(sleepers) / sizeof(sleepers[0]); i++)
         thread_create(sleepers[i].name, sleeper_main, (void *)&sleepers[i]);
+    return 0;
+}
+
+static void tss_probe(void *arg)
+{
+    (void)arg;
+
+    thread_t *t  = sched_current();
+    uint32_t top = (uint32_t)t->kstack + THREAD_STACK_SIZE;
+    uint32_t esp0 = tss_get_kernel_stack();
+
+    kprintf("thread %u: tss.esp0 %p, stack top %p: %s\n",
+            t->id, (void *)esp0, (void *)top, esp0 == top ? "ok" : "FAIL");
+}
+
+static int cmd_tss(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    uint16_t tr;
+    struct { uint16_t limit; uint32_t base; } __attribute__((packed)) gdtr;
+
+    __asm__ volatile ("str %0" : "=r"(tr));
+    __asm__ volatile ("sgdt %0" : "=m"(gdtr));
+
+    kprintf("TR=%x (expected %x)\n", (unsigned)tr, (unsigned)GDT_TSS);
+    kprintf("GDT limit=%u (expected %u)\n", (unsigned)gdtr.limit, GDT_ENTRIES * 8 - 1);
+
+    thread_create("tssprobe1", tss_probe, NULL);
+    thread_create("tssprobe2", tss_probe, NULL);
+    return 0;
+}
+
+static int regs_clobbered;
+static int total_checks;
+static int bad_checks;
+
+static void check(const char *name, int cond)
+{
+    total_checks++;
+    if (!cond)
+        bad_checks++;
+    kprintf("%s %s\n", cond ? "ok  " : "FAIL", name);
+}
+
+static int32_t do_sys(uint32_t n, uint32_t a, uint32_t b, uint32_t c)
+{
+    int32_t ret;
+    uint32_t a2 = a, b2 = b, c2 = c;
+
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret), "+b"(a2), "+c"(b2), "+d"(c2)
+                      : "0"(n)
+                      : "memory");
+
+    if (a2 != a || b2 != b || c2 != c)
+        regs_clobbered = 1;
+    return ret;
+}
+
+static void exit_probe(void *arg)
+{
+    (void)arg;
+
+    kprintf("exit_probe: calling SYS_exit(42)\n");
+    do_sys(SYS_exit, 42, 0, 0);
+    kprintf("exit_probe: UNREACHABLE, SYS_exit returned!\n");
+}
+
+static int cmd_syscall(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    static const char msg[] = "hello via int 0x80\n";
+    uint32_t len = sizeof(msg) - 1;
+
+    total_checks = 0;
+    bad_checks = 0;
+    regs_clobbered = 0;
+
+    check("write returns length",          do_sys(SYS_write, 1, (uint32_t)msg, len) == (int32_t)len);
+    check("write of zero bytes returns 0", do_sys(SYS_write, 1, (uint32_t)msg, 0) == 0);
+    check("bad fd -> -1",                  do_sys(SYS_write, 7, (uint32_t)msg, len) == -1);
+    check("NULL buffer -> -1",             do_sys(SYS_write, 1, 0, 8) == -1);
+    check("ptr + len overflow -> -1",      do_sys(SYS_write, 1, 0xFFFFFFF0u, 64) == -1);
+    check("huge length -> -1",             do_sys(SYS_write, 1, (uint32_t)msg, 5000) == -1);
+    check("syscall 0 -> -1",               do_sys(0, 0, 0, 0) == -1);
+    check("unknown syscall -> -1",         do_sys(999, 0, 0, 0) == -1);
+
+    uint32_t t0 = timer_ticks();
+    uint32_t r  = (uint32_t)do_sys(SYS_ticks, 0, 0, 0);
+    uint32_t t1 = timer_ticks();
+
+    check("ticks between two reads", r >= t0 && r <= t1);
+
+    uint32_t fl;
+
+    __asm__ volatile ("pushf; pop %0" : "=r"(fl));
+    check("IF restored by iret", (fl & 0x200) != 0);
+    check("ebx/ecx/edx preserved", !regs_clobbered);
+
+    if (bad_checks)
+        kprintf("%d of %d checks FAILED\n", bad_checks, total_checks);
+    else
+        kprintf("all %d checks passed\n", total_checks);
+
+    thread_create("exitprobe", exit_probe, NULL);
+    thread_sleep_ms(200);
+    kprintf("exitprobe must be gone from ps now\n");
     return 0;
 }
 
