@@ -56,6 +56,8 @@ add_executable(Chessie.elf
         src/cpu/tss.c
         src/include/syscall.h
         src/cpu/syscall.c
+        src/include/aspace.h
+        src/mm/aspace.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)

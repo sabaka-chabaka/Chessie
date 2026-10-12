@@ -5,6 +5,7 @@
 #include <pmm.h>
 #include <string.h>
 #include <sync.h>
+#include <vmm.h>
 
 #define MAX_PAGES    (1u << 20)
 #define BITMAP_WORDS (MAX_PAGES / 32)
@@ -77,6 +78,9 @@ void pmm_init(const multiboot_info_t *mbi)
 
             uint32_t first = (uint32_t)((e->addr + PAGE_SIZE - 1) >> PAGE_SHIFT);
             uint32_t last  = (uint32_t)(area_end >> PAGE_SHIFT);
+
+            if (last > (VMM_IDENTITY_LIMIT >> PAGE_SHIFT))
+                last = VMM_IDENTITY_LIMIT >> PAGE_SHIFT;
 
             for (uint32_t p = first; p < last; p++)
                 page_free(p);

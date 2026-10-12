@@ -7,6 +7,8 @@
 #define THREAD_STACK_CANARY 0xDEADC0DEu
 #define THREAD_NAME_MAX 16
 
+struct aspace;
+
 typedef enum {
     THREAD_READY,
     THREAD_RUNNING,
@@ -26,6 +28,7 @@ typedef struct thread {
     thread_fn_t    entry;
     void          *arg;
     uint32_t       wake_tick;
+    struct aspace *aspace;
     struct thread *next;
     struct thread *wait_next;
 } thread_t;

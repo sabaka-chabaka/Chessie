@@ -5,6 +5,7 @@
 #include <sched.h>
 #include <string.h>
 #include <thread.h>
+#include <aspace.h>
 
 _Static_assert(offsetof(thread_t, esp) == 0, "esp must be the first field: switch.S relies on it");
 
@@ -58,6 +59,8 @@ thread_t *thread_alloc(const char *name, thread_fn_t entry, void *arg)
 
 void thread_free(thread_t *t)
 {
+    if (t->aspace)
+        aspace_destroy(t->aspace);
     kfree(t->kstack);
     kfree(t);
 }

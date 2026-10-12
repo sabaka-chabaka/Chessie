@@ -120,6 +120,8 @@ void schedule(void)
         if (next->kstack)
             tss_set_kernel_stack((uint32_t)next->kstack + THREAD_STACK_SIZE);
 
+        aspace_switch(next->aspace);
+
         switch_context(&prev->esp, next->esp);
     }
 
