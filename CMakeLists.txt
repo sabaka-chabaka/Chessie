@@ -62,6 +62,12 @@ add_executable(Chessie.elf
         src/mm/aspace.c
         src/include/usertest.h
         src/kernel/usertest.c
+        src/include/initrd.h
+        src/kernel/initrd.c
+        src/include/vfs.h
+        src/fs/vfs.c
+        src/include/tarfs.h
+        src/fs/tarfs.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
@@ -84,12 +90,31 @@ set_target_properties(Chessie.elf PROPERTIES LINK_DEPENDS ${CMAKE_SOURCE_DIR}/li
 set(ISO_DIR  ${CMAKE_BINARY_DIR}/isodir)
 set(ISO_FILE ${CMAKE_BINARY_DIR}/Chessie.iso)
 
+set(INITRD_DIR ${CMAKE_SOURCE_DIR}/initrd)
+set(INITRD_TAR ${CMAKE_BINARY_DIR}/initrd.tar)
+
+file(GLOB_RECURSE INITRD_FILES CONFIGURE_DEPENDS RELATIVE ${INITRD_DIR} ${INITRD_DIR}/*)
+if(NOT INITRD_FILES)
+    message(FATAL_ERROR "initrd/ is empty")
+endif()
+list(TRANSFORM INITRD_FILES PREPEND ${INITRD_DIR}/ OUTPUT_VARIABLE INITRD_DEPS)
+
+add_custom_command(
+        OUTPUT ${INITRD_TAR}
+        COMMAND ${CMAKE_COMMAND} -E tar cf ${INITRD_TAR} --format=gnutar -- ${INITRD_FILES}
+        WORKING_DIRECTORY ${INITRD_DIR}
+        DEPENDS ${INITRD_DEPS}
+        COMMENT "Packing initrd.tar"
+        VERBATIM
+)
+
 add_custom_target(iso ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory ${ISO_DIR}/boot/grub
         COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:Chessie.elf> ${ISO_DIR}/boot/Chessie.elf
+        COMMAND ${CMAKE_COMMAND} -E copy ${INITRD_TAR} ${ISO_DIR}/boot/initrd.tar
         COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/grub.cfg ${ISO_DIR}/boot/grub/grub.cfg
         COMMAND grub-mkrescue -o ${ISO_FILE} ${ISO_DIR}
-        DEPENDS Chessie.elf ${CMAKE_SOURCE_DIR}/grub.cfg
+        DEPENDS Chessie.elf ${INITRD_TAR} ${CMAKE_SOURCE_DIR}/grub.cfg
         COMMENT "Building Chessie.iso"
 )
 add_dependencies(iso Chessie.elf)

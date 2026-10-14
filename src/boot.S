@@ -1,5 +1,5 @@
 .set MAGIC,    0x1BADB002
-.set FLAGS,    0x2
+.set FLAGS,    0x3
 .set CHECKSUM, -(MAGIC + FLAGS)
 
 .section .multiboot, "a"

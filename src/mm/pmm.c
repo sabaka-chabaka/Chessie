@@ -52,6 +52,12 @@ static void reserve_range(uint32_t start, uint32_t end)
         page_use(p);
 }
 
+static void reserve_cstring(uint32_t addr)
+{
+    if (addr)
+        reserve_range(addr, addr + (uint32_t)strlen((const char *)addr) + 1);
+}
+
 void pmm_init(const multiboot_info_t *mbi)
 {
     memset(bitmap, 0xFF, sizeof(bitmap));
@@ -98,6 +104,22 @@ void pmm_init(const multiboot_info_t *mbi)
     reserve_range((uint32_t)kernel_start, (uint32_t)kernel_end);
     reserve_range((uint32_t)mbi, (uint32_t)mbi + sizeof(*mbi));
     reserve_range(mbi->mmap_addr, mbi->mmap_addr + mbi->mmap_length);
+
+    if (mbi->flags & MULTIBOOT_INFO_CMDLINE)
+        reserve_cstring(mbi->cmdline);
+    if (mbi->flags & MULTIBOOT_INFO_LOADER)
+        reserve_cstring(mbi->boot_loader_name);
+
+    if (mbi->flags & MULTIBOOT_INFO_MODS) {
+        const multiboot_module_t *m = (const multiboot_module_t *)mbi->mods_addr;
+
+        reserve_range(mbi->mods_addr, mbi->mods_addr + mbi->mods_count * (uint32_t)sizeof(*m));
+
+        for (uint32_t i = 0; i < mbi->mods_count; i++) {
+            reserve_range(m[i].mod_start, m[i].mod_end);
+            reserve_cstring(m[i].string);
+        }
+    }
 }
 
 static uint32_t alloc_nolock(void)

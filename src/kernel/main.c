@@ -13,6 +13,7 @@
 #include <pmm.h>
 #include <vmm.h>
 #include <heap.h>
+#include <initrd.h>
 #include <sched.h>
 #include <shell.h>
 
@@ -42,6 +43,8 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi)
     vmm_init();
     heap_init();
     kprintf("mem: %u pages free, heap at %p\n", pmm_free_pages(), (void *)KHEAP_START);
+
+    initrd_init(mbi);
 
     sched_init();
     kprintf("sched: ready\n");

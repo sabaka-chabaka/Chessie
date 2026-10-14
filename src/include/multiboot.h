@@ -5,8 +5,11 @@
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
 
-#define MULTIBOOT_INFO_MEM  (1 << 0)
-#define MULTIBOOT_INFO_MMAP (1 << 6)
+#define MULTIBOOT_INFO_MEM     (1 << 0)
+#define MULTIBOOT_INFO_CMDLINE (1 << 2)
+#define MULTIBOOT_INFO_MODS    (1 << 3)
+#define MULTIBOOT_INFO_MMAP    (1 << 6)
+#define MULTIBOOT_INFO_LOADER  (1 << 9)
 
 #define MULTIBOOT_MEMORY_AVAILABLE 1
 
@@ -28,7 +31,9 @@ typedef struct multiboot_info {
     uint32_t apm_table;
 } __attribute__((packed)) multiboot_info_t;
 
-_Static_assert(offsetof(multiboot_info_t, mmap_addr) == 48, "multiboot_info layout");
+_Static_assert(offsetof(multiboot_info_t, mods_count) == 20, "multiboot_info layout");
+_Static_assert(offsetof(multiboot_info_t, mods_addr)  == 24, "multiboot_info layout");
+_Static_assert(offsetof(multiboot_info_t, mmap_addr)  == 48, "multiboot_info layout");
 
 typedef struct multiboot_mmap_entry {
     uint32_t size;
@@ -36,3 +41,12 @@ typedef struct multiboot_mmap_entry {
     uint64_t len;
     uint32_t type;
 } __attribute__((packed)) multiboot_mmap_entry_t;
+
+typedef struct multiboot_module {
+    uint32_t mod_start;
+    uint32_t mod_end;
+    uint32_t string;
+    uint32_t reserved;
+} __attribute__((packed)) multiboot_module_t;
+
+_Static_assert(sizeof(multiboot_module_t) == 16, "multiboot_module layout");

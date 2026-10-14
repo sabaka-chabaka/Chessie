@@ -19,6 +19,8 @@
 #include <tss.h>
 #include <aspace.h>
 #include <usertest.h>
+#include <initrd.h>
+#include <vfs.h>
 
 extern char kernel_start[];
 extern char kernel_end[];
@@ -53,6 +55,9 @@ static int cmd_tss(int argc, char **argv);
 static int cmd_syscall(int argc, char **argv);
 static int cmd_usertest(int argc, char **argv);
 static int cmd_aspacetest(int argc, char **argv);
+static int cmd_ls(int argc, char **argv);
+static int cmd_cat(int argc, char **argv);
+static int cmd_vfstest(int argc, char **argv);
 
 static const struct command commands[] = {
     { "help",   "list commands",        cmd_help   },
@@ -74,6 +79,9 @@ static const struct command commands[] = {
     { "syscall", "test int 0x80 from kernel mode",        cmd_syscall },
 { "usertest",   "usertest [hello|cli|kread|wcode|outb]: ring 3 demo", cmd_usertest   },
 { "aspacetest", "address space isolation and cleanup tests",          cmd_aspacetest },
+{ "ls",      "ls [path]: list a directory",    cmd_ls      },
+{ "cat",     "cat <path>: print a file",       cmd_cat     },
+{ "vfstest", "VFS, tarfs and initrd checks",   cmd_vfstest },
 };
 
 #define NCMDS (sizeof(commands) / sizeof(commands[0]))
@@ -570,6 +578,410 @@ static int cmd_aspacetest(int argc, char **argv)
 
     kprintf("leaked pages after destroy: %d\n", leaked);
     check("no pages leaked", leaked == 0);
+
+    if (bad_checks)
+        kprintf("%d of %d checks FAILED\n", bad_checks, total_checks);
+    else
+        kprintf("all %d checks passed\n", total_checks);
+    return 0;
+}
+
+static int cmd_ls(int argc, char **argv)
+{
+    const char *path = argc > 1 ? argv[1] : "/";
+    vfs_stat_t st;
+    int r = vfs_stat(path, &st);
+
+    if (r < 0) {
+        kprintf("ls: %s: %s\n", path, vfs_strerror(r));
+        return 1;
+    }
+
+    if (st.type == VFS_FILE) {
+        kprintf("%u  %s\n", st.size, path);
+        return 0;
+    }
+
+    vfs_dirent_t d;
+    uint32_t i = 0;
+
+    while ((r = vfs_readdir(path, i++, &d)) == 0) {
+        if (d.type == VFS_DIR)
+            kprintf("  %s/\n", d.name);
+        else
+            kprintf("  %s  %u\n", d.name, d.size);
+    }
+    if (r < 0)
+        kprintf("ls: %s: %s\n", path, vfs_strerror(r));
+    return 0;
+}
+
+static int cmd_cat(int argc, char **argv)
+{
+    static char buf[256];
+
+    if (argc < 2) {
+        kprintf("usage: cat <path>\n");
+        return 1;
+    }
+
+    int fd = vfs_open(argv[1]);
+
+    if (fd < 0) {
+        kprintf("cat: %s: %s\n", argv[1], vfs_strerror(fd));
+        return 1;
+    }
+
+    int32_t n;
+
+    while ((n = vfs_read(fd, buf, sizeof(buf))) > 0) {
+        for (int32_t i = 0; i < n; i++) {
+            char c = buf[i];
+
+            kprintf("%c", (c == '\n' || c == '\t' || (c >= 32 && c < 127)) ? c : '.');
+        }
+    }
+
+    vfs_close(fd);
+    return 0;
+}
+
+#define HELLO_TXT    "Hello from initrd!\n"
+#define NOTES_TXT    "second file\n"
+#define LEAF_TXT     "leaf\n"
+#define NUMBERS_SIZE 8893u              /* "1\n" ... "2000\n" */
+
+/* Печатает только провалы: так на экране не тонет итог */
+static void vcheck(const char *name, int cond)
+{
+    total_checks++;
+    if (!cond) {
+        bad_checks++;
+        kprintf("FAIL %s\n", name);
+    }
+}
+
+static int read_all(const char *path, char *dst, uint32_t cap, uint32_t *got)
+{
+    int fd = vfs_open(path);
+    uint32_t total = 0;
+    int32_t n = 0;
+
+    if (fd < 0)
+        return fd;
+
+    while (total < cap && (n = vfs_read(fd, dst + total, cap - total)) > 0)
+        total += (uint32_t)n;
+
+    vfs_close(fd);
+    *got = total;
+    return 0;
+}
+
+static int file_is(const char *path, const char *expect)
+{
+    static char b[128];
+    uint32_t got, len = (uint32_t)strlen(expect);
+
+    return read_all(path, b, sizeof(b), &got) == 0 && got == len && memcmp(b, expect, len) == 0;
+}
+
+/* Читает numbers.txt кусками по chunk байт: 2000 строк, i-я строка равна i, граница куска где угодно */
+static int verify_numbers(uint32_t chunk, uint32_t *bytes)
+{
+    static char b[512];
+    int fd = vfs_open("/numbers.txt");
+
+    if (fd < 0)
+        return 0;
+
+    uint32_t expect = 1, val = 0, digits = 0, total = 0;
+    int ok = 1;
+    int32_t n;
+
+    while ((n = vfs_read(fd, b, chunk)) > 0) {
+        total += (uint32_t)n;
+        for (int32_t i = 0; i < n; i++) {
+            char c = b[i];
+
+            if (c >= '0' && c <= '9') {
+                val = val * 10 + (uint32_t)(c - '0');
+                digits++;
+            } else if (c == '\n') {
+                if (!digits || val != expect)
+                    ok = 0;
+                expect++;
+                val = 0;
+                digits = 0;
+            } else {
+                ok = 0;
+            }
+        }
+    }
+
+    vfs_close(fd);
+    *bytes = total;
+    return ok && n == 0 && expect == 2001 && digits == 0;
+}
+
+static int dir_find(const char *dir, const char *name, vfs_dirent_t *out, int *times)
+{
+    vfs_dirent_t d;
+    uint32_t i = 0;
+    int found = 0;
+
+    while (vfs_readdir(dir, i++, &d) == 0) {
+        if (strcmp(d.name, name) == 0) {
+            if (!found)
+                *out = d;
+            found++;
+        }
+    }
+    *times = found;
+    return found > 0;
+}
+
+static int cmd_vfstest(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    static char buf[512];
+    static char whole[9000];
+    static uint32_t pages[300];
+    vfs_stat_t st;
+    vfs_dirent_t d;
+    uint32_t got, bytes;
+    int times;
+
+    total_checks = 0;
+    bad_checks = 0;
+
+    uint32_t open0 = vfs_open_files();
+
+    /* --- нормализация путей --- */
+    static const struct { const char *in, *out; } norm[] = {
+        { "/", "" }, { "", "" }, { "hello.txt", "hello.txt" }, { "/hello.txt", "hello.txt" },
+        { "//docs///notes.txt/", "docs/notes.txt" },
+        { "/docs/./deep/../notes.txt", "docs/notes.txt" },
+        { "/../../hello.txt", "hello.txt" }, { "/docs/..", "" }, { "./a/./b", "a/b" },
+    };
+    char out[VFS_PATH_MAX];
+
+    for (size_t i = 0; i < sizeof(norm) / sizeof(norm[0]); i++) {
+        int ok = vfs_normalize(norm[i].in, out, sizeof(out)) == 0 && strcmp(out, norm[i].out) == 0;
+
+        vcheck(norm[i].in, ok);
+    }
+
+    memset(buf, 'a', 300);
+    buf[300] = '\0';
+    vcheck("normalize refuses a 300-char path", vfs_normalize(buf, out, sizeof(out)) != 0);
+    vcheck("open of a too long path -> EINVAL", vfs_open(buf) == VFS_EINVAL);
+
+    /* --- stat --- */
+    vcheck("stat /",              vfs_stat("/", &st) == 0 && st.type == VFS_DIR);
+    vcheck("stat hello.txt",      vfs_stat("/hello.txt", &st) == 0 && st.type == VFS_FILE &&
+                                  st.size == strlen(HELLO_TXT));
+    vcheck("stat empty.txt",      vfs_stat("/empty.txt", &st) == 0 && st.type == VFS_FILE && st.size == 0);
+    vcheck("stat numbers.txt",    vfs_stat("/numbers.txt", &st) == 0 && st.size == NUMBERS_SIZE);
+    vcheck("docs is an implied directory",   vfs_stat("/docs", &st) == 0 && st.type == VFS_DIR);
+    vcheck("docs/deep is an implied directory", vfs_stat("/docs/deep", &st) == 0 && st.type == VFS_DIR);
+    vcheck("missing file -> ENOENT",         vfs_stat("/nope", &st) == VFS_ENOENT);
+    vcheck("file used as directory -> ENOENT", vfs_stat("/hello.txt/x", &st) == VFS_ENOENT);
+    vcheck("'doc' is not a prefix match for docs", vfs_stat("/doc", &st) == VFS_ENOENT);
+
+    /* --- содержимое --- */
+    vcheck("hello.txt content",   file_is("/hello.txt", HELLO_TXT));
+    vcheck("docs/notes.txt content", file_is("/docs/notes.txt", NOTES_TXT));
+    vcheck("docs/deep/leaf.txt content", file_is("/docs/deep/leaf.txt", LEAF_TXT));
+    vcheck("path with ./ and ../ resolves", file_is("//docs/./deep/../notes.txt", NOTES_TXT));
+
+    int fd = vfs_open("/hello.txt");
+
+    vcheck("open hello.txt", fd >= VFS_FIRST_FD);
+    vcheck("read returns the whole file", vfs_read(fd, buf, sizeof(buf)) == (int32_t)strlen(HELLO_TXT));
+    vcheck("read at EOF returns 0", vfs_read(fd, buf, sizeof(buf)) == 0);
+    vcheck("read of 0 bytes returns 0", vfs_read(fd, buf, 0) == 0);
+    vcheck("read into NULL -> EINVAL", vfs_read(fd, NULL, 4) == VFS_EINVAL);
+    vcheck("close", vfs_close(fd) == 0);
+
+    /* по одному байту */
+    fd = vfs_open("/hello.txt");
+    {
+        uint32_t len = (uint32_t)strlen(HELLO_TXT), n = 0;
+
+        while (n < sizeof(buf) && vfs_read(fd, buf + n, 1) == 1)
+            n++;
+        vcheck("byte-by-byte read", n == len && memcmp(buf, HELLO_TXT, len) == 0);
+    }
+    vfs_close(fd);
+
+    /* пустой файл */
+    fd = vfs_open("/empty.txt");
+    vcheck("empty file reads 0", fd >= VFS_FIRST_FD && vfs_read(fd, buf, 16) == 0);
+    vcheck("seek END in empty file", vfs_seek(fd, 0, VFS_SEEK_END) == 0);
+    vfs_close(fd);
+
+    /* --- seek --- */
+    fd = vfs_open("/hello.txt");
+    {
+        int32_t len = (int32_t)strlen(HELLO_TXT);
+
+        vcheck("seek SET 6",  vfs_seek(fd, 6, VFS_SEEK_SET) == 6);
+        vcheck("read after seek", vfs_read(fd, buf, 4) == 4 && memcmp(buf, "from", 4) == 0);
+        vcheck("seek CUR 0 reports position", vfs_seek(fd, 0, VFS_SEEK_CUR) == 10);
+        vcheck("seek END -1", vfs_seek(fd, -1, VFS_SEEK_END) == len - 1);
+        vcheck("last byte is newline", vfs_read(fd, buf, 1) == 1 && buf[0] == '\n');
+        vcheck("seek to exact end is allowed", vfs_seek(fd, len, VFS_SEEK_SET) == len);
+        vcheck("read at exact end returns 0", vfs_read(fd, buf, 4) == 0);
+        vcheck("seek before start -> EINVAL", vfs_seek(fd, -1, VFS_SEEK_SET) == VFS_EINVAL);
+        vcheck("seek past end -> EINVAL", vfs_seek(fd, len + 1, VFS_SEEK_SET) == VFS_EINVAL);
+        vcheck("bad whence -> EINVAL", vfs_seek(fd, 0, 7) == VFS_EINVAL);
+        vcheck("failed seek keeps position", vfs_seek(fd, 0, VFS_SEEK_CUR) == len);
+    }
+    vfs_close(fd);
+
+    /* --- большой файл, чтение кусками разного размера --- */
+    static const uint32_t chunks[] = { 1, 7, 509, 512 };
+
+    for (size_t i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+        bytes = 0;
+        vcheck("numbers.txt parsed, all 2000 lines intact",
+               verify_numbers(chunks[i], &bytes) && bytes == NUMBERS_SIZE);
+    }
+
+    vcheck("numbers.txt read in full",
+           read_all("/numbers.txt", whole, sizeof(whole), &got) == 0 && got == NUMBERS_SIZE);
+    vcheck("numbers.txt ends with 2000", memcmp(whole + NUMBERS_SIZE - 5, "2000\n", 5) == 0);
+
+    /* seek в большом файле, включая границы страниц */
+    static const uint32_t offs[] = { 0, 1, 511, 512, 4093, 4096, 8887 };
+
+    fd = vfs_open("/numbers.txt");
+    for (size_t i = 0; i < sizeof(offs) / sizeof(offs[0]); i++) {
+        int ok = vfs_seek(fd, (int32_t)offs[i], VFS_SEEK_SET) == (int32_t)offs[i] &&
+                 vfs_read(fd, buf, 6) == 6 && memcmp(buf, whole + offs[i], 6) == 0;
+
+        vcheck("seek and read inside numbers.txt", ok);
+    }
+    vcheck("read is clamped at the end",
+           vfs_seek(fd, 8890, VFS_SEEK_SET) == 8890 && vfs_read(fd, buf, 100) == 3);
+    vfs_close(fd);
+
+    /* --- каталоги --- */
+    vcheck("open of a directory -> EISDIR", vfs_open("/docs") == VFS_EISDIR);
+    vcheck("open of / -> EISDIR", vfs_open("/") == VFS_EISDIR);
+    vcheck("readdir of a file -> ENOTDIR", vfs_readdir("/hello.txt", 0, &d) == VFS_ENOTDIR);
+    vcheck("readdir of a missing path -> ENOENT", vfs_readdir("/nope", 0, &d) == VFS_ENOENT);
+
+    vcheck("root lists docs once, as a directory",
+           dir_find("/", "docs", &d, &times) && times == 1 && d.type == VFS_DIR);
+    vcheck("root lists hello.txt",
+           dir_find("/", "hello.txt", &d, &times) && times == 1 && d.type == VFS_FILE &&
+           d.size == strlen(HELLO_TXT));
+    vcheck("root lists numbers.txt",
+           dir_find("/", "numbers.txt", &d, &times) && times == 1 && d.size == NUMBERS_SIZE);
+    vcheck("root lists empty.txt",
+           dir_find("/", "empty.txt", &d, &times) && times == 1 && d.size == 0);
+    vcheck("root does not list nested names",
+           !dir_find("/", "notes.txt", &d, &times) && !dir_find("/", "leaf.txt", &d, &times));
+
+    vcheck("docs lists notes.txt",
+           dir_find("/docs", "notes.txt", &d, &times) && times == 1 && d.type == VFS_FILE);
+    vcheck("docs lists deep as a directory",
+           dir_find("/docs", "deep", &d, &times) && times == 1 && d.type == VFS_DIR);
+    vcheck("docs/deep lists leaf.txt",
+           dir_find("/docs/deep", "leaf.txt", &d, &times) && times == 1);
+
+    {
+        vfs_dirent_t a, b;
+
+        vcheck("readdir is stateless: same index, same answer",
+               vfs_readdir("/", 0, &a) == 0 && vfs_readdir("/", 0, &b) == 0 &&
+               strcmp(a.name, b.name) == 0);
+        vcheck("readdir past the end returns 1", vfs_readdir("/", 1000, &d) == 1);
+    }
+
+    /* --- таблица дескрипторов --- */
+    static int fds[VFS_MAX_FDS + 8];
+    int nfds = 0, last = 0;
+
+    for (; nfds < VFS_MAX_FDS + 8; nfds++) {
+        last = vfs_open("/hello.txt");
+        if (last < 0)
+            break;
+        fds[nfds] = last;
+    }
+
+    vcheck("table fills up at exactly MAX - FIRST descriptors", nfds == VFS_MAX_FDS - VFS_FIRST_FD);
+    vcheck("full table -> ENFILE", last == VFS_ENFILE);
+
+    int distinct = 1;
+
+    for (int i = 0; i < nfds; i++) {
+        if (fds[i] < VFS_FIRST_FD || fds[i] >= VFS_MAX_FDS)
+            distinct = 0;
+        for (int j = 0; j < i; j++) {
+            if (fds[i] == fds[j])
+                distinct = 0;
+        }
+    }
+    vcheck("all descriptors are distinct and in range", distinct);
+
+    for (int i = 0; i < nfds; i++)
+        vfs_close(fds[i]);
+
+    vcheck("no descriptors left open", vfs_open_files() == open0);
+
+    int a = vfs_open("/hello.txt");
+    int b = vfs_open("/hello.txt");
+
+    vcheck("two opens give two descriptors", a >= VFS_FIRST_FD && b >= VFS_FIRST_FD && a != b);
+    vcheck("first descriptor advances", vfs_read(a, buf, 5) == 5 && memcmp(buf, "Hello", 5) == 0);
+    vcheck("second descriptor has its own position", vfs_read(b, buf, 1) == 1 && buf[0] == 'H');
+    vfs_close(a);
+    vfs_close(b);
+
+    vcheck("double close -> EBADF", vfs_close(a) == VFS_EBADF);
+    vcheck("read after close -> EBADF", vfs_read(a, buf, 4) == VFS_EBADF);
+    vcheck("seek after close -> EBADF", vfs_seek(a, 0, VFS_SEEK_SET) == VFS_EBADF);
+    vcheck("close(-1) -> EBADF", vfs_close(-1) == VFS_EBADF);
+    vcheck("close(1000) -> EBADF", vfs_close(1000) == VFS_EBADF);
+    vcheck("stdin/stdout/stderr are reserved", vfs_close(0) == VFS_EBADF && vfs_close(1) == VFS_EBADF &&
+                                               vfs_close(2) == VFS_EBADF);
+
+    /* --- страницы модуля не должны попасть в аллокатор --- */
+    uint32_t mstart, mend;
+
+    if (initrd_range(&mstart, &mend) == 0) {
+        uint32_t n = 0;
+        int overlap = 0;
+
+        while (n < 300) {
+            pages[n] = pmm_alloc_page();
+            if (!pages[n])
+                break;
+            n++;
+        }
+
+        for (uint32_t i = 0; i < n; i++) {
+            if (pages[i] < mend && pages[i] + PAGE_SIZE > mstart)
+                overlap = 1;
+            memset((void *)pages[i], 0xEE, PAGE_SIZE);      /* затираем всё, что выдал аллокатор */
+        }
+
+        vcheck("pmm never hands out module pages", !overlap);
+        vcheck("module intact after filling every allocated page",
+               verify_numbers(512, &bytes) && bytes == NUMBERS_SIZE);
+
+        for (uint32_t i = 0; i < n; i++)
+            pmm_free_page(pages[i]);
+    } else {
+        vcheck("initrd module is present", 0);
+    }
+
+    vcheck("no descriptors leaked by the whole test", vfs_open_files() == open0);
 
     if (bad_checks)
         kprintf("%d of %d checks FAILED\n", bad_checks, total_checks);
