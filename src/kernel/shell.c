@@ -17,6 +17,8 @@
 #include <gdt.h>
 #include <syscall.h>
 #include <tss.h>
+#include <aspace.h>
+#include <usertest.h>
 
 extern char kernel_start[];
 extern char kernel_end[];
@@ -49,6 +51,8 @@ static int cmd_sleeptest(int argc, char **argv);
 static int cmd_racetest(int argc, char **argv);
 static int cmd_tss(int argc, char **argv);
 static int cmd_syscall(int argc, char **argv);
+static int cmd_usertest(int argc, char **argv);
+static int cmd_aspacetest(int argc, char **argv);
 
 static const struct command commands[] = {
     { "help",   "list commands",        cmd_help   },
@@ -68,6 +72,8 @@ static const struct command commands[] = {
     { "racetest",  "racetest [irq|mutex]: data race demo", cmd_racetest  },
     { "tss",     "check TR, GDT and tss.esp0 per thread", cmd_tss     },
     { "syscall", "test int 0x80 from kernel mode",        cmd_syscall },
+{ "usertest",   "usertest [hello|cli|kread|wcode|outb]: ring 3 demo", cmd_usertest   },
+{ "aspacetest", "address space isolation and cleanup tests",          cmd_aspacetest },
 };
 
 #define NCMDS (sizeof(commands) / sizeof(commands[0]))
@@ -412,6 +418,163 @@ static int cmd_syscall(int argc, char **argv)
     thread_create("exitprobe", exit_probe, NULL);
     thread_sleep_ms(200);
     kprintf("exitprobe must be gone from ps now\n");
+    return 0;
+}
+
+static int cmd_usertest(int argc, char **argv)
+{
+    static const char *const modes[] = { "hello", "cli", "kread", "wcode", "outb" };
+    const uint32_t nmodes = sizeof(modes) / sizeof(modes[0]);
+    uint32_t mode = 0;
+
+    if (argc > 1) {
+        while (mode < nmodes && strcmp(argv[1], modes[mode]) != 0)
+            mode++;
+        if (mode == nmodes) {
+            kprintf("usage: usertest [hello|cli|kread|wcode|outb]\n");
+            return 1;
+        }
+    }
+
+    heap_stats_t s0;
+    heap_stats(&s0);
+    uint32_t free0 = pmm_free_pages();
+
+    usertest_start(mode);
+    thread_sleep_ms(500);
+
+    heap_stats_t s1;
+    heap_stats(&s1);
+    uint32_t free1 = pmm_free_pages();
+
+    int32_t heap_pages = (int32_t)((s1.mapped - s0.mapped) / PAGE_SIZE);
+    int32_t leaked = (int32_t)(free0 - free1) - heap_pages;
+
+    kprintf("leaked pages: %d %s\n", leaked, leaked == 0 ? "ok" : "FAIL");
+    return 0;
+}
+
+static int cmd_aspacetest(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    const uint32_t VA = VMM_USER_BASE;
+    const uint32_t BIG = 6u << 20;
+
+    total_checks = 0;
+    bad_checks = 0;
+
+    heap_stats_t h0;
+    heap_stats(&h0);
+    uint32_t free0 = pmm_free_pages();
+
+    aspace_t *a = aspace_create();
+    aspace_t *b = aspace_create();
+
+    check("two address spaces created", a && b && a != b && a->pd != b->pd);
+    if (!a || !b) {
+        kprintf("out of memory\n");
+        return 1;
+    }
+
+    check("map in a", aspace_map_new(a, VA, VMM_USER | VMM_WRITE) == 0);
+    check("map in b", aspace_map_new(b, VA, VMM_USER | VMM_WRITE) == 0);
+
+    uint32_t pa = aspace_phys(a, VA);
+    uint32_t pb = aspace_phys(b, VA);
+
+    check("different physical pages", pa && pb && pa != pb);
+    check("kernel space does not see VA", vmm_get_phys(VA) == 0);
+
+    *(volatile uint32_t *)pa = 0xAAAA1111;
+    *(volatile uint32_t *)pb = 0xBBBB2222;
+
+    volatile uint32_t *v = (volatile uint32_t *)VA;
+    int a_own, b_own, wrote_a, b_intact;
+
+    uint32_t f = irq_save();
+
+    aspace_switch(a);
+    a_own = (*v == 0xAAAA1111);
+    aspace_switch(b);
+    b_own = (*v == 0xBBBB2222);
+    aspace_switch(a);
+    *v = 0x12345678;
+    wrote_a  = (*(volatile uint32_t *)pa == 0x12345678);
+    b_intact = (*(volatile uint32_t *)pb == 0xBBBB2222);
+    aspace_switch(aspace_kernel());
+    irq_restore(f);
+
+    check("a reads its own value at VA", a_own);
+    check("b reads its own value at VA", b_own);
+    check("write through VA lands in a's page", wrote_a);
+    check("b's page untouched", b_intact);
+
+    void *big = kmalloc(BIG);
+
+    check("kmalloc 6 MiB", big != NULL);
+
+    if (big) {
+        uint32_t first = (uint32_t)big;
+        uint32_t last  = first + BIG - 4;
+        uint32_t kf = vmm_get_phys(first), kl = vmm_get_phys(last);
+
+        int visible = kf && kl &&
+                      aspace_phys(a, first) == kf && aspace_phys(a, last) == kl &&
+                      aspace_phys(b, first) == kf && aspace_phys(b, last) == kl;
+
+        check("grown heap is mapped in both spaces", visible);
+
+        if (visible) {
+            int shared;
+
+            f = irq_save();
+            aspace_switch(a);
+            *(volatile uint32_t *)first = 0x600DF00D;
+            *(volatile uint32_t *)last  = 0xFEEDFACE;
+            aspace_switch(b);
+            shared = *(volatile uint32_t *)first == 0x600DF00D &&
+                     *(volatile uint32_t *)last  == 0xFEEDFACE;
+            aspace_switch(aspace_kernel());
+            irq_restore(f);
+
+            check("heap memory is shared between spaces", shared);
+        }
+    }
+
+    check("user_ok: whole rw page",             aspace_user_ok(a, VA, PAGE_SIZE, 1));
+    check("user_ok: last word of page",         aspace_user_ok(a, VA + PAGE_SIZE - 4, 4, 1));
+    check("user_ok: crosses into unmapped",     !aspace_user_ok(a, VA + PAGE_SIZE - 4, 8, 0));
+    check("user_ok: unmapped address",          !aspace_user_ok(a, VA + 0x100000, 4, 0));
+    check("user_ok: kernel address",            !aspace_user_ok(a, 0x00100000, 4, 0));
+    check("user_ok: kernel heap address",       !aspace_user_ok(a, KHEAP_START, 4, 0));
+    check("user_ok: address wraps around",      !aspace_user_ok(a, 0xFFFFFFF0u, 64, 0));
+
+    check("map read-only page", aspace_map_new(a, VA + 0x2000, VMM_USER) == 0);
+    check("user_ok: read-only is readable",     aspace_user_ok(a, VA + 0x2000, 4, 0));
+    check("user_ok: read-only is not writable", !aspace_user_ok(a, VA + 0x2000, 4, 1));
+
+    check("user flag outside user region is refused",
+          vmm_map_page(0xE0000000u, pa, VMM_USER) == -1);
+
+    kfree(big);
+    aspace_destroy(a);
+    aspace_destroy(b);
+
+    heap_stats_t h1;
+    heap_stats(&h1);
+
+    int32_t growth = (int32_t)((h1.mapped - h0.mapped) / PAGE_SIZE);
+    int32_t leaked = (int32_t)(free0 - pmm_free_pages()) - growth;
+
+    kprintf("leaked pages after destroy: %d\n", leaked);
+    check("no pages leaked", leaked == 0);
+
+    if (bad_checks)
+        kprintf("%d of %d checks FAILED\n", bad_checks, total_checks);
+    else
+        kprintf("all %d checks passed\n", total_checks);
     return 0;
 }
 

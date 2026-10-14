@@ -2,6 +2,8 @@
 
 #include <idt.h>
 #include <kprintf.h>
+#include <sched.h>
+#include <thread.h>
 
 static const char *names[32] = {
     "Divide by zero", "Debug", "NMI", "Breakpoint", "Overflow",
@@ -29,7 +31,22 @@ static void page_fault_info(const registers_t *regs)
 
 void isr_handler(registers_t *regs)
 {
-    kprintf("\nEXCEPTION %u: %s\n", regs->int_no, names[regs->int_no]);
+    const char *name = regs->int_no < 32 ? names[regs->int_no] : "?";
+
+    if ((regs->cs & 3) == 3) {
+        thread_t *t = sched_current();
+
+        kprintf("\nEXCEPTION %u (%s) in user mode, thread %u '%s'\n",
+                regs->int_no, name, t->id, t->name);
+        if (regs->int_no == 14)
+            page_fault_info(regs);
+        kprintf("err=%x eip=%x esp=%x cs=%x\n",
+                regs->err_code, regs->eip, regs->useresp, regs->cs);
+        kprintf("thread killed\n");
+        thread_exit();
+    }
+
+    kprintf("\nEXCEPTION %u: %s\n", regs->int_no, name);
 
     if (regs->int_no == 14)
         page_fault_info(regs);

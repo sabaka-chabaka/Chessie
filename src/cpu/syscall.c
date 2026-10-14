@@ -1,5 +1,6 @@
 #include <stdint.h>
 
+#include <aspace.h>
 #include <kprintf.h>
 #include <pit.h>
 #include <sched.h>
@@ -8,20 +9,31 @@
 
 #define WRITE_MAX 4096
 
-typedef int32_t (*syscall_fn)(uint32_t a, uint32_t b, uint32_t c);
+typedef int32_t (*syscall_fn)(const registers_t *r);
 
-static int range_ok(uint32_t ptr, uint32_t len)
+static int buf_ok(const registers_t *r, uint32_t ptr, uint32_t len, int write)
 {
-    return ptr != 0 && len <= WRITE_MAX && ptr + len >= ptr;
+    if (len > WRITE_MAX)
+        return 0;
+    if (ptr == 0 || ptr + len < ptr)
+        return 0;
+
+    if ((r->cs & 3) == 3)
+        return aspace_user_ok(aspace_current(), ptr, len, write);
+    return 1;
 }
 
-static int32_t sys_write(uint32_t fd, uint32_t buf, uint32_t len)
+static int32_t sys_write(const registers_t *r)
 {
+    uint32_t fd  = r->ebx;
+    uint32_t buf = r->ecx;
+    uint32_t len = r->edx;
+
     if (fd != 1 && fd != 2)
         return -1;
     if (len == 0)
         return 0;
-    if (!range_ok(buf, len))
+    if (!buf_ok(r, buf, len, 0))
         return -1;
 
     const char *s = (const char *)buf;
@@ -32,21 +44,15 @@ static int32_t sys_write(uint32_t fd, uint32_t buf, uint32_t len)
     return (int32_t)len;
 }
 
-static int32_t sys_exit(uint32_t code, uint32_t b, uint32_t c)
+static int32_t sys_exit(const registers_t *r)
 {
-    (void)b;
-    (void)c;
-
-    kprintf("[thread %u exited with %d]\n", sched_current()->id, (int)code);
+    kprintf("[thread %u exited with %d]\n", sched_current()->id, (int)r->ebx);
     thread_exit();
 }
 
-static int32_t sys_ticks(uint32_t a, uint32_t b, uint32_t c)
+static int32_t sys_ticks(const registers_t *r)
 {
-    (void)a;
-    (void)b;
-    (void)c;
-
+    (void)r;
     return (int32_t)timer_ticks();
 }
 
@@ -67,5 +73,5 @@ void syscall_handler(registers_t *regs)
         return;
     }
 
-    regs->eax = (uint32_t)table[n](regs->ebx, regs->ecx, regs->edx);
+    regs->eax = (uint32_t)table[n](regs);
 }
