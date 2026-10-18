@@ -21,6 +21,8 @@
 #include <usertest.h>
 #include <initrd.h>
 #include <vfs.h>
+#include <elf.h>
+#include <process.h>
 
 extern char kernel_start[];
 extern char kernel_end[];
@@ -58,6 +60,11 @@ static int cmd_aspacetest(int argc, char **argv);
 static int cmd_ls(int argc, char **argv);
 static int cmd_cat(int argc, char **argv);
 static int cmd_vfstest(int argc, char **argv);
+static int cmd_exec(int argc, char **argv);
+static int cmd_bg(int argc, char **argv);
+static int cmd_procs(int argc, char **argv);
+static int cmd_proctest(int argc, char **argv);
+static int cmd_elftest(int argc, char **argv);
 
 static const struct command commands[] = {
     { "help",   "list commands",        cmd_help   },
@@ -82,6 +89,11 @@ static const struct command commands[] = {
 { "ls",      "ls [path]: list a directory",    cmd_ls      },
 { "cat",     "cat <path>: print a file",       cmd_cat     },
 { "vfstest", "VFS, tarfs and initrd checks",   cmd_vfstest },
+{ "exec",     "exec <prog> [args]: run a program and wait", cmd_exec     },
+{ "bg",       "bg <prog> [args]: run detached",             cmd_bg       },
+{ "procs",    "list user processes",                        cmd_procs    },
+{ "proctest", "spawn/exit/wait/fault tests",                cmd_proctest },
+{ "elftest",  "ELF loader tests on mutated images",         cmd_elftest  },
 };
 
 #define NCMDS (sizeof(commands) / sizeof(commands[0]))
@@ -982,6 +994,583 @@ static int cmd_vfstest(int argc, char **argv)
     }
 
     vcheck("no descriptors leaked by the whole test", vfs_open_files() == open0);
+
+    if (bad_checks)
+        kprintf("%d of %d checks FAILED\n", bad_checks, total_checks);
+    else
+        kprintf("all %d checks passed\n", total_checks);
+    return 0;
+}
+
+/* "hello" -> "/bin/hello", а путь со слэшем остаётся как есть */
+static int resolve_prog(const char *name, char *out, size_t n)
+{
+    size_t len = strlen(name);
+    int slash = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        if (name[i] == '/')
+            slash = 1;
+    }
+
+    if (slash) {
+        if (len + 1 > n)
+            return -1;
+        memcpy(out, name, len + 1);
+        return 0;
+    }
+
+    if (5 + len + 1 > n)
+        return -1;
+    memcpy(out, "/bin/", 5);
+    memcpy(out + 5, name, len + 1);
+    return 0;
+}
+
+static int cmd_exec(int argc, char **argv)
+{
+    char path[VFS_PATH_MAX];
+
+    if (argc < 2) {
+        kprintf("usage: exec <prog> [args]\n");
+        return 1;
+    }
+    if (resolve_prog(argv[1], path, sizeof(path)) != 0) {
+        kprintf("exec: path too long\n");
+        return 1;
+    }
+
+    /* argv + 1 заканчивается NULL: tokenize ставит его после последнего слова */
+    int pid = proc_spawn(path, (const char *const *)(argv + 1), 0);
+
+    if (pid < 0) {
+        kprintf("exec: %s: %s\n", path, proc_strerror(pid));
+        return 1;
+    }
+
+    int32_t st = 0;
+
+    proc_wait(pid, &st);
+    if (st >= PROC_FAULT_BASE && st < PROC_FAULT_BASE + 32)
+        kprintf("[pid %d killed by exception %d]\n", pid, (int)st - PROC_FAULT_BASE);
+    else
+        kprintf("[pid %d exited with %d]\n", pid, (int)st);
+    return 0;
+}
+
+static int cmd_bg(int argc, char **argv)
+{
+    char path[VFS_PATH_MAX];
+
+    if (argc < 2) {
+        kprintf("usage: bg <prog> [args]\n");
+        return 1;
+    }
+    if (resolve_prog(argv[1], path, sizeof(path)) != 0) {
+        kprintf("bg: path too long\n");
+        return 1;
+    }
+
+    int pid = proc_spawn(path, (const char *const *)(argv + 1), PROC_SPAWN_DETACHED);
+
+    if (pid < 0) {
+        kprintf("bg: %s: %s\n", path, proc_strerror(pid));
+        return 1;
+    }
+    kprintf("[pid %d started]\n", pid);
+    return 0;
+}
+
+static int cmd_procs(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    proc_list();
+    return 0;
+}
+
+#define SPAWN_FAILED (-100000)
+
+static int32_t status_of(const char *path, const char *a1, const char *a2)
+{
+    const char *av[4];
+    int n = 0;
+    int32_t st = 0;
+
+    av[n++] = path;
+    if (a1)
+        av[n++] = a1;
+    if (a2)
+        av[n++] = a2;
+    av[n] = NULL;
+
+    int pid = proc_spawn(path, av, 0);
+
+    if (pid < 0) {
+        kprintf("spawn %s failed: %s\n", path, proc_strerror(pid));
+        return SPAWN_FAILED;
+    }
+    if (proc_wait(pid, &st) != pid) {
+        kprintf("wait for %d failed\n", pid);
+        return SPAWN_FAILED;
+    }
+    return st;
+}
+
+/* Сколько страниц ушло безвозвратно. Рост кучи не в счёт: страницы кучи в pmm не возвращаются. */
+static int32_t leaked_pages(uint32_t free0, uint32_t mapped0)
+{
+    heap_stats_t s;
+
+    heap_stats(&s);
+    return (int32_t)(free0 - pmm_free_pages()) - (int32_t)((s.mapped - mapped0) / PAGE_SIZE);
+}
+
+static uint32_t ud32(aspace_t *as, uint32_t va)
+{
+    uint32_t ph = aspace_phys(as, va);
+
+    return ph ? *(uint32_t *)ph : 0xDEADBEEFu;
+}
+
+static int ustreq(aspace_t *as, uint32_t va, const char *s)
+{
+    for (;; va++, s++) {
+        uint32_t ph = aspace_phys(as, va);
+
+        if (!ph || *(char *)ph != *s)
+            return 0;
+        if (!*s)
+            return 1;
+    }
+}
+
+static void test_stack_layout(void)
+{
+    aspace_t *as = aspace_create();
+
+    vcheck("stack test: aspace created", as != NULL);
+    if (!as)
+        return;
+
+    int mapped = 1;
+
+    for (uint32_t i = 0; i < PROC_STACK_PAGES; i++)
+        mapped &= aspace_map_new(as, PROC_STACK_TOP - (i + 1) * PAGE_SIZE, VMM_USER | VMM_WRITE) == 0;
+    vcheck("stack test: pages mapped", mapped);
+
+    const char *av[] = { "prog", "ab", "", "xyz", NULL };         /* среди аргументов есть пустая строка */
+    uint32_t esp = 0;
+
+    vcheck("build_stack succeeds", proc_build_stack(as, av, &esp) == 0);
+
+    if (mapped && esp) {
+        uint32_t lo = PROC_STACK_TOP - PROC_STACK_PAGES * PAGE_SIZE;
+
+        vcheck("esp is 16-byte aligned", (esp & 15) == 0);
+        vcheck("esp inside the stack", esp >= lo && esp < PROC_STACK_TOP);
+        vcheck("argc is 4", ud32(as, esp) == 4);
+
+        int ptrs = 1;
+
+        for (uint32_t i = 0; i < 4; i++) {
+            uint32_t a = ud32(as, esp + 4 + 4 * i);
+
+            if (a < esp || a >= PROC_STACK_TOP || !ustreq(as, a, av[i]))
+                ptrs = 0;
+        }
+        vcheck("argv[0..3] point at the right strings", ptrs);
+        vcheck("argv ends with NULL", ud32(as, esp + 4 + 16) == 0);
+        vcheck("envp is empty", ud32(as, esp + 4 + 20) == 0);
+    }
+
+    aspace_destroy(as);
+}
+
+static int cmd_proctest(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    static char huge[PROC_ARGS_MAX_BYTES + 8];
+    static const char *many[PROC_MAX_ARGS + 2];
+    static char nums[8][2];
+
+    total_checks = 0;
+    bad_checks = 0;
+
+    uint32_t base_procs = proc_count();
+    uint32_t open0 = vfs_open_files();
+    uint32_t free0 = pmm_free_pages();
+    heap_stats_t h0;
+
+    heap_stats(&h0);
+
+    /* --- коды выхода --- */
+    vcheck("exit code 7",   status_of("/bin/exitcode", "7", NULL) == 7);
+    vcheck("exit code 200", status_of("/bin/exitcode", "200", NULL) == 200);
+    vcheck("negative exit code", status_of("/bin/exitcode", "-1", NULL) == -1);
+    vcheck("hello exits with 0", status_of("/bin/hello", NULL, NULL) == 0);
+
+    /* --- ошибки spawn: процесса нет, а память возвращена --- */
+    vcheck("spawn of a missing file",   proc_spawn("/nope", NULL, 0) == VFS_ENOENT);
+    vcheck("spawn of a directory",      proc_spawn("/bin", NULL, 0) == VFS_EISDIR);
+    vcheck("spawn of a text file",      proc_spawn("/hello.txt", NULL, 0) == ELF_EFORMAT);
+    vcheck("spawn of an empty file",    proc_spawn("/empty.txt", NULL, 0) == ELF_EFORMAT);
+
+    for (int i = 0; i < PROC_MAX_ARGS + 1; i++)
+        many[i] = "x";
+    many[PROC_MAX_ARGS + 1] = NULL;
+    vcheck("17 arguments are too many", proc_spawn("/bin/hello", many, 0) == PROC_E2BIG);
+
+    many[PROC_MAX_ARGS] = NULL;
+    int pid = proc_spawn("/bin/hello", many, 0);                    /* ровно 16: допустимо */
+    int32_t st = -1;
+
+    vcheck("16 arguments are accepted", pid > 0 && proc_wait(pid, &st) == pid && st == 0);
+
+    memset(huge, 'a', PROC_ARGS_MAX_BYTES);
+    huge[PROC_ARGS_MAX_BYTES] = '\0';
+    const char *av_huge[] = { huge, NULL };
+
+    vcheck("argument string one byte over the limit", proc_spawn("/bin/hello", av_huge, 0) == PROC_E2BIG);
+
+    huge[PROC_ARGS_MAX_BYTES - 1] = '\0';                           /* вместе с нулём ровно по границе */
+    pid = proc_spawn("/bin/hello", av_huge, 0);
+    st = -1;
+    vcheck("argument string exactly at the limit", pid > 0 && proc_wait(pid, &st) == pid && st == 0);
+
+    test_stack_layout();
+    vcheck("argv layout seen by the program",
+           status_of("/bin/argcheck", "one", "two") == 1 /* нужен третий аргумент */);
+    {
+        const char *av[] = { "/bin/argcheck", "one", "two", "three", NULL };
+
+        pid = proc_spawn("/bin/argcheck", av, 0);
+        st = -1;
+        vcheck("argcheck one two three", pid > 0 && proc_wait(pid, &st) == pid && st == 0);
+    }
+
+    /* --- исключения убивают процесс, а не ядро --- */
+    static const struct { const char *mode; int32_t want; } faults[] = {
+        { "null", 142 }, { "kernel", 142 }, { "wcode", 142 }, { "stack", 142 },
+        { "cli", 141 },  { "outb", 141 },   { "div", 128 },   { "ud2", 134 },
+        { "syscall", 0 },
+    };
+
+    for (size_t i = 0; i < sizeof(faults) / sizeof(faults[0]); i++) {
+        int32_t got = status_of("/bin/crash", faults[i].mode, NULL);
+
+        if (got != faults[i].want)
+            kprintf("crash %s: got %d, want %d\n", faults[i].mode, (int)got, (int)faults[i].want);
+        vcheck(faults[i].mode, got == faults[i].want);
+    }
+
+    /* --- сегменты и изоляция памяти --- */
+    vcheck("layout: bss, data, rodata", status_of("/bin/layout", NULL, NULL) == 0);
+    {
+        const char *av[] = { "/bin/layout", NULL };
+        int a = proc_spawn("/bin/layout", av, 0);
+        int b = proc_spawn("/bin/layout", av, 0);
+        int32_t sa = -1, sb = -1;
+
+        vcheck("two layouts running at once", a > 0 && b > 0 && a != b);
+        if (a > 0)
+            proc_wait(a, &sa);
+        if (b > 0)
+            proc_wait(b, &sb);
+        vcheck("both layouts kept their own memory across preemption", sa == 0 && sb == 0);
+    }
+
+    /* --- много процессов сразу, ожидание в обратном порядке --- */
+    {
+        int pids[8];
+        int spawned = 1, ok = 1;
+
+        for (int i = 0; i < 8; i++) {
+            nums[i][0] = (char)('0' + i);
+            nums[i][1] = '\0';
+
+            const char *av[] = { "/bin/exitcode", nums[i], "3", NULL };
+
+            pids[i] = proc_spawn("/bin/exitcode", av, 0);
+            if (pids[i] <= 0)
+                spawned = 0;
+        }
+        vcheck("8 processes spawned", spawned);
+
+        for (int i = 7; i >= 0; i--) {
+            int32_t s = -1;
+
+            if (pids[i] > 0 && (proc_wait(pids[i], &s) != pids[i] || s != i))
+                ok = 0;
+        }
+        vcheck("8 statuses collected in reverse order", ok);
+    }
+
+    /* --- семантика wait --- */
+    {
+        const char *av[] = { "/bin/exitcode", "4", NULL };
+
+        pid = proc_spawn("/bin/exitcode", av, 0);
+        st = -1;
+        vcheck("wait returns the pid and the status", proc_wait(pid, &st) == pid && st == 4);
+        vcheck("second wait for the same pid fails", proc_wait(pid, &st) == -1);
+        vcheck("wait for pid 99999 fails", proc_wait(99999, &st) == -1);
+        vcheck("wait for pid 0 fails", proc_wait(0, &st) == -1);
+        vcheck("wait for a negative pid fails", proc_wait(-5, &st) == -1);
+    }
+
+    /* --- detached --- */
+    {
+        const char *av[] = { "/bin/exitcode", "3", "5", NULL };
+
+        pid = proc_spawn("/bin/exitcode", av, PROC_SPAWN_DETACHED);
+        vcheck("detached spawn", pid > 0);
+        vcheck("a detached process cannot be waited for", proc_wait(pid, &st) == -1);
+        thread_sleep_ms(400);
+        vcheck("detached process removed itself", proc_count() == base_procs);
+    }
+
+    /* --- spawn и wait из пользовательского режима --- */
+    vcheck("spawner: user-mode spawn/wait", status_of("/bin/spawner", NULL, NULL) == 0);
+    thread_sleep_ms(900);                  /* живой сирота дорабатывает свои ~400 мс */
+    vcheck("spawner's orphans are gone", proc_count() == base_procs);
+
+    /* --- много запусков подряд --- */
+    int stress_ok = 1;
+
+    for (int i = 0; i < 30; i++) {
+        if (status_of("/bin/exitcode", "0", NULL) != 0)
+            stress_ok = 0;
+    }
+    vcheck("30 sequential spawns", stress_ok);
+
+    /* --- ничего не осталось --- */
+    thread_sleep_ms(500);                  /* умершие потоки освобождаются в ближайших schedule() */
+    vcheck("no processes left", proc_count() == base_procs);
+    vcheck("no file descriptors left open", vfs_open_files() == open0);
+
+    int32_t leaked = leaked_pages(free0, h0.mapped);
+
+    kprintf("leaked pages: %d\n", (int)leaked);
+    vcheck("no pages leaked", leaked == 0);
+
+    if (bad_checks)
+        kprintf("%d of %d checks FAILED\n", bad_checks, total_checks);
+    else
+        kprintf("all %d checks passed\n", total_checks);
+    return 0;
+}
+
+static int try_load(const void *img, uint32_t size, uint32_t *entry)
+{
+    aspace_t *as = aspace_create();
+
+    if (!as)
+        return ELF_ENOMEM;
+
+    int r = elf_load_mem(img, size, as, entry);
+
+    aspace_destroy(as);
+    return r;
+}
+
+static void expect(const char *name, const void *img, uint32_t size, int want)
+{
+    uint32_t entry;
+    int got = try_load(img, size, &entry);
+
+    total_checks++;
+    if (got != want) {
+        bad_checks++;
+        kprintf("FAIL %s: got %d (%s), want %d (%s)\n",
+                name, got, proc_strerror(got), want, proc_strerror(want));
+    }
+}
+
+static int seg_bytes_ok(aspace_t *as, const Elf32_Phdr *p, const uint8_t *img)
+{
+    for (uint32_t i = 0; i < p->p_filesz; i++) {
+        uint32_t phys = aspace_phys(as, p->p_vaddr + i);
+
+        if (!phys || *(uint8_t *)phys != img[p->p_offset + i])
+            return 0;
+    }
+    return 1;
+}
+
+static int bss_zero(aspace_t *as, const Elf32_Phdr *p)
+{
+    for (uint32_t a = p->p_vaddr + p->p_filesz; a < p->p_vaddr + p->p_memsz; a++) {
+        uint32_t phys = aspace_phys(as, a);
+
+        if (!phys || *(uint8_t *)phys)
+            return 0;
+    }
+    return 1;
+}
+
+static int cmd_elftest(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    total_checks = 0;
+    bad_checks = 0;
+
+    /* Берём /bin/layout: в нём есть и код, и инициализированные данные, и .bss */
+    vfs_stat_t st;
+
+    if (vfs_stat("/bin/layout", &st) != 0 || st.size < 200 || st.size > ELF_MAX_FILE) {
+        kprintf("elftest: /bin/layout is missing or has a strange size\n");
+        return 1;
+    }
+
+    uint32_t size = st.size, got = 0;
+    uint8_t *img = kmalloc(size);
+    uint8_t *w = kmalloc(size);
+
+    if (!img || !w || read_all("/bin/layout", (char *)img, size, &got) != 0 || got != size) {
+        kprintf("elftest: cannot read /bin/layout\n");
+        kfree(img);
+        kfree(w);
+        return 1;
+    }
+
+    uint32_t free0 = pmm_free_pages();
+    heap_stats_t h0;
+
+    heap_stats(&h0);
+
+    const Elf32_Ehdr *e0 = (const Elf32_Ehdr *)img;
+    Elf32_Ehdr *eh = (Elf32_Ehdr *)w;
+    const Elf32_Phdr *ph0 = (const Elf32_Phdr *)(img + e0->e_phoff);
+    Elf32_Phdr *ph = (Elf32_Phdr *)(w + e0->e_phoff);
+    int t = -1, d = -1;
+
+    for (int i = 0; i < e0->e_phnum; i++) {
+        if (ph0[i].p_type != PT_LOAD)
+            continue;
+        if ((ph0[i].p_flags & PF_X) && t < 0)
+            t = i;
+        if ((ph0[i].p_flags & PF_W) && d < 0)
+            d = i;
+    }
+    if (t < 0 || d < 0 || ph0[d].p_filesz == 0 || ph0[d].p_memsz <= ph0[d].p_filesz) {
+        kprintf("elftest: unexpected segment layout in /bin/layout\n");
+        kfree(img);
+        kfree(w);
+        return 1;
+    }
+
+#define RESET() memcpy(w, img, size)
+
+    /* --- правильный образ: что именно оказалось в памяти --- */
+    {
+        aspace_t *as = aspace_create();
+        uint32_t entry = 0;
+        int r = as ? elf_load_mem(img, size, as, &entry) : ELF_ENOMEM;
+
+        vcheck("pristine image loads", r == 0);
+        if (r == 0) {
+            uint32_t d_end = ph0[d].p_vaddr + ph0[d].p_memsz;
+            uint32_t t_end = ph0[t].p_vaddr + ph0[t].p_filesz;
+
+            vcheck("entry point returned", entry == e0->e_entry);
+            vcheck("text is readable from user mode", aspace_user_ok(as, ph0[t].p_vaddr, ph0[t].p_filesz, 0));
+            vcheck("text is not writable", !aspace_user_ok(as, ph0[t].p_vaddr, 1, 1));
+            vcheck("text bytes match the file", seg_bytes_ok(as, &ph0[t], img));
+            vcheck("data is writable", aspace_user_ok(as, ph0[d].p_vaddr, ph0[d].p_memsz, 1));
+            vcheck("data bytes match the file", seg_bytes_ok(as, &ph0[d], img));
+            vcheck("bss is zeroed", bss_zero(as, &ph0[d]));
+            vcheck("page after the data segment is not mapped",
+                   aspace_phys(as, (d_end + PAGE_SIZE - 1) & ~0xFFFu) == 0);
+            vcheck("page before the first segment is not mapped",
+                   aspace_phys(as, (ph0[t].p_vaddr & ~0xFFFu) - PAGE_SIZE) == 0);
+            vcheck("kernel space does not see the program", vmm_get_phys(ph0[t].p_vaddr) == 0);
+            (void)t_end;
+        }
+        if (as)
+            aspace_destroy(as);
+    }
+
+    RESET(); w[1] = 'X';                                    expect("bad magic", w, size, ELF_EFORMAT);
+    RESET(); w[4] = 2;                                      expect("64-bit class", w, size, ELF_EFORMAT);
+    RESET(); w[5] = 2;                                      expect("big endian", w, size, ELF_EFORMAT);
+    RESET(); w[6] = 2;                                      expect("ident version 2", w, size, ELF_EFORMAT);
+    RESET(); eh->e_type = 3;                                expect("ET_DYN", w, size, ELF_EFORMAT);
+    RESET(); eh->e_machine = 62;                            expect("x86-64 machine", w, size, ELF_EFORMAT);
+    RESET(); eh->e_version = 2;                             expect("version 2", w, size, ELF_EFORMAT);
+    RESET(); eh->e_phentsize = 33;                          expect("wrong phentsize", w, size, ELF_EFORMAT);
+    RESET(); eh->e_phnum = 0;                               expect("no program headers", w, size, ELF_EFORMAT);
+    RESET(); eh->e_phnum = ELF_MAX_PHNUM + 1;               expect("too many program headers", w, size, ELF_EFORMAT);
+    RESET(); eh->e_phoff = size;                            expect("phoff at end of file", w, size, ELF_EFORMAT);
+    RESET(); eh->e_phoff = 0xFFFFFFF0u;                     expect("phoff far outside the file", w, size, ELF_EFORMAT);
+    RESET();                                                expect("empty image", w, 0, ELF_EFORMAT);
+    RESET();                                                expect("10-byte image", w, 10, ELF_EFORMAT);
+    RESET();                                                expect("image ends inside the ELF header", w, 51, ELF_EFORMAT);
+    RESET();                                                expect("image ends inside program headers",
+                                                                   w, e0->e_phoff + 16, ELF_EFORMAT);
+
+    RESET();                                                expect("image cut inside the data segment",
+                                                                   w, ph0[d].p_offset + ph0[d].p_filesz - 1, ELF_ESEGMENT);
+    RESET(); ph[t].p_memsz = ph[t].p_filesz - 1;            expect("memsz smaller than filesz", w, size, ELF_ESEGMENT);
+    RESET(); ph[t].p_vaddr = 0x1000;                        expect("vaddr below the user area", w, size, ELF_ESEGMENT);
+    RESET(); ph[t].p_vaddr = 0x00100000;                    expect("vaddr in kernel memory", w, size, ELF_ESEGMENT);
+    RESET(); ph[t].p_vaddr = 0xC0000000u;                   expect("vaddr in the kernel heap", w, size, ELF_ESEGMENT);
+    RESET(); ph[t].p_vaddr = 0xFFFFF000u; ph[t].p_memsz = 0x2000;
+                                                            expect("vaddr + memsz wraps around", w, size, ELF_ESEGMENT);
+    RESET(); ph[t].p_memsz = 0x80000000u;                   expect("segment reaches the stack", w, size, ELF_ESEGMENT);
+    RESET(); ph[t].p_memsz = 0x800000;                      expect("8 MiB segment", w, size, ELF_ETOOBIG);
+    RESET(); ph[t].p_offset = size;                         expect("offset at end of file", w, size, ELF_ESEGMENT);
+    RESET(); ph[t].p_offset = 0xFFFFFFF0u;                  expect("offset far outside the file", w, size, ELF_ESEGMENT);
+
+    /* --- вход и тип сегментов --- */
+    RESET(); eh->e_entry = 0;                               expect("entry 0", w, size, ELF_EFORMAT);
+    RESET(); eh->e_entry = 0x50000000u;                     expect("entry outside every segment", w, size, ELF_EFORMAT);
+    RESET(); eh->e_entry = ph0[d].p_vaddr;                  expect("entry in a data segment", w, size, ELF_EFORMAT);
+    RESET(); ph[t].p_flags &= ~(uint32_t)PF_X;              expect("no executable segment", w, size, ELF_EFORMAT);
+    RESET(); ph[d].p_type = PT_INTERP;                      expect("PT_INTERP", w, size, ELF_EFORMAT);
+    RESET(); ph[d].p_type = PT_DYNAMIC;                     expect("PT_DYNAMIC", w, size, ELF_EFORMAT);
+    RESET(); for (int i = 0; i < eh->e_phnum; i++) ph[i].p_type = PT_NULL;
+                                                            expect("no loadable segments", w, size, ELF_EFORMAT);
+    RESET(); ph[d].p_filesz = 0; ph[d].p_memsz = 0;         expect("empty segment is ignored", w, size, 0);
+
+    {
+        RESET();
+        ph[d].p_vaddr = ph0[t].p_vaddr;
+
+        aspace_t *as = aspace_create();
+        uint32_t entry;
+        int r = as ? elf_load_mem(w, size, as, &entry) : ELF_ENOMEM;
+
+        vcheck("overlapping segments load", r == 0);
+        vcheck("shared page becomes writable", r == 0 && aspace_user_ok(as, ph0[t].p_vaddr, 1, 1));
+        if (as)
+            aspace_destroy(as);
+    }
+
+    {
+        aspace_t *as = aspace_create();
+        uint32_t entry;
+
+        vcheck("elf_load: missing file",   elf_load("/nope", as, &entry) == VFS_ENOENT);
+        vcheck("elf_load: directory",      elf_load("/bin", as, &entry) == VFS_EISDIR);
+        vcheck("elf_load: text file",      elf_load("/hello.txt", as, &entry) == ELF_EFORMAT);
+        vcheck("elf_load: empty file",     elf_load("/empty.txt", as, &entry) == ELF_EFORMAT);
+        vcheck("elf_load: real program",   elf_load("/bin/hello", as, &entry) == 0);
+        aspace_destroy(as);
+    }
+
+    int32_t leaked = leaked_pages(free0, h0.mapped);
+
+    kprintf("leaked pages: %d\n", (int)leaked);
+    vcheck("no pages leaked by failed loads", leaked == 0);
+
+    kfree(img);
+    kfree(w);
 
     if (bad_checks)
         kprintf("%d of %d checks FAILED\n", bad_checks, total_checks);

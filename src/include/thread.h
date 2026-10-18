@@ -1,13 +1,14 @@
 #pragma once
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
-#define THREAD_STACK_SIZE 8192
+#define THREAD_STACK_SIZE   8192
 #define THREAD_STACK_CANARY 0xDEADC0DEu
-#define THREAD_NAME_MAX 16
+#define THREAD_NAME_MAX     16
 
 struct aspace;
+struct process;
 
 typedef enum {
     THREAD_READY,
@@ -20,17 +21,18 @@ typedef enum {
 typedef void (*thread_fn_t)(void *arg);
 
 typedef struct thread {
-    uint32_t       esp;
-    uint32_t       id;
-    thread_state_t state;
-    char           name[THREAD_NAME_MAX];
-    uint8_t       *kstack;
-    thread_fn_t    entry;
-    void          *arg;
-    uint32_t       wake_tick;
-    struct aspace *aspace;
-    struct thread *next;
-    struct thread *wait_next;
+    uint32_t        esp;
+    uint32_t        id;
+    thread_state_t  state;
+    char            name[THREAD_NAME_MAX];
+    uint8_t        *kstack;
+    thread_fn_t     entry;
+    void           *arg;
+    uint32_t        wake_tick;
+    struct aspace  *aspace;
+    struct process *proc;
+    struct thread  *next;
+    struct thread  *wait_next;
 } thread_t;
 
 thread_t *thread_create(const char *name, thread_fn_t entry, void *arg);

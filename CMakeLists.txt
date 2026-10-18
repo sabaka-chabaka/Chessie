@@ -68,6 +68,11 @@ add_executable(Chessie.elf
         src/fs/vfs.c
         src/include/tarfs.h
         src/fs/tarfs.c
+        src/include/elf.h
+        src/kernel/elf.c
+        src/include/usermode.h
+        src/include/process.h
+        src/kernel/process.c
 )
 
 target_include_directories(Chessie.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/include)
@@ -91,7 +96,34 @@ set(ISO_DIR  ${CMAKE_BINARY_DIR}/isodir)
 set(ISO_FILE ${CMAKE_BINARY_DIR}/Chessie.iso)
 
 set(INITRD_DIR ${CMAKE_SOURCE_DIR}/initrd)
+set(INITRD_STAGE ${CMAKE_BINARY_DIR}/initrd_stage)
 set(INITRD_TAR ${CMAKE_BINARY_DIR}/initrd.tar)
+
+set(USER_PROGS hello args exitcode crash layout argcheck spawner)
+set(USER_TARGETS "")
+set(INITRD_BIN_FILES "")
+
+foreach(p IN LISTS USER_PROGS)
+    add_executable(user_${p} user/${p}.c user/crt0.S)
+    target_include_directories(user_${p} PRIVATE ${CMAKE_SOURCE_DIR}/user)
+    target_compile_options(user_${p} PRIVATE
+            -m32 -fno-pie -fno-stack-protector -fcf-protection=none
+            -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns
+            -ffreestanding -O2 -Wall -Wextra
+    )
+    target_link_options(user_${p} PRIVATE
+            -m32 -static -no-pie -nostdlib -ffreestanding
+            -Wl,--build-id=none -Wl,-z,noexecstack -Wl,-z,max-page-size=0x1000
+            -T ${CMAKE_SOURCE_DIR}/user/user.ld
+    )
+    set_target_properties(user_${p} PROPERTIES
+            OUTPUT_NAME ${p}
+            RUNTIME_OUTPUT_DIRECTORY ${INITRD_STAGE}/bin
+            LINK_DEPENDS ${CMAKE_SOURCE_DIR}/user/user.ld
+    )
+    list(APPEND USER_TARGETS user_${p})
+    list(APPEND INITRD_BIN_FILES bin/${p})
+endforeach()
 
 file(GLOB_RECURSE INITRD_FILES CONFIGURE_DEPENDS RELATIVE ${INITRD_DIR} ${INITRD_DIR}/*)
 if(NOT INITRD_FILES)
@@ -101,9 +133,10 @@ list(TRANSFORM INITRD_FILES PREPEND ${INITRD_DIR}/ OUTPUT_VARIABLE INITRD_DEPS)
 
 add_custom_command(
         OUTPUT ${INITRD_TAR}
-        COMMAND ${CMAKE_COMMAND} -E tar cf ${INITRD_TAR} --format=gnutar -- ${INITRD_FILES}
-        WORKING_DIRECTORY ${INITRD_DIR}
-        DEPENDS ${INITRD_DEPS}
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${INITRD_DIR} ${INITRD_STAGE}
+        COMMAND ${CMAKE_COMMAND} -E tar cf ${INITRD_TAR} --format=gnutar -- ${INITRD_FILES} ${INITRD_BIN_FILES}
+        WORKING_DIRECTORY ${INITRD_STAGE}
+        DEPENDS ${INITRD_DEPS} ${USER_TARGETS}
         COMMENT "Packing initrd.tar"
         VERBATIM
 )

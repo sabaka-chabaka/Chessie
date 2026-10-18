@@ -2,6 +2,7 @@
 
 #include <idt.h>
 #include <kprintf.h>
+#include <process.h>
 #include <sched.h>
 #include <thread.h>
 
@@ -20,7 +21,7 @@ static void page_fault_info(const registers_t *regs)
 {
     uint32_t cr2;
 
-    __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));   /* адрес, на котором упали */
+    __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
 
     kprintf("page fault at %p: %s, %s, %s mode\n",
             (void *)cr2,
@@ -42,8 +43,13 @@ void isr_handler(registers_t *regs)
             page_fault_info(regs);
         kprintf("err=%x eip=%x esp=%x cs=%x\n",
                 regs->err_code, regs->eip, regs->useresp, regs->cs);
-        kprintf("thread killed\n");
-        thread_exit();
+
+        if (t->proc)
+            kprintf("process %u killed\n", t->proc->pid);
+        else
+            kprintf("thread killed\n");
+
+        proc_exit(PROC_FAULT_BASE + (int32_t)regs->int_no);
     }
 
     kprintf("\nEXCEPTION %u: %s\n", regs->int_no, name);
